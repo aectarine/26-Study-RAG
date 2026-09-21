@@ -1,0 +1,958 @@
+import hashlib
+import time
+
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.requests import Request
+from pydantic import BaseModel
+
+from database import get_connection
+from embedding import create_embedding
+from rag import generate_answer
+
+
+class EmbeddingRequest(BaseModel):
+    text: str
+
+
+class DocumentRequest(BaseModel):
+    content: str
+
+
+class SearchRequest(BaseModel):
+    question: str
+
+
+app = FastAPI(
+    title="Study-RAG",
+    description="FastAPI + PostgreSQL + Ollama RAG 학습 프로젝트",
+    version="1.0.0"
+)
+
+
+@app.middleware("http")
+async def measure_response_time(request: Request, call_next):
+    start_time = time.perf_counter()
+
+    # 요청에 해당하는 API 실행
+    response = await call_next(request)
+
+    # API 실행 완료 후 경과 시간 계산
+    elapsed_time = time.perf_counter() - start_time
+
+    # 응답 헤더에 실행 시간 추가
+    response.headers["X-Process-Time"] = f"{elapsed_time:.3f}"
+
+    return response
+
+
+def split_text(content: str) -> list[str]:
+    # Windows 줄바꿈(\r\n)을 \n으로 통일
+    content = content.replace("\r\n", "\n").replace("\r", "\n")
+
+    # 빈 줄을 기준으로 문단 분할
+    return [
+        paragraph.strip()
+        for paragraph in content.split("\n\n")
+        if paragraph.strip()
+    ]
+
+
+def create_content_hash(content: str) -> str:
+    # Windows와 Linux의 줄바꿈 차이를 통일
+    normalize_content = content.replace("\r\n", "\n").replace("\r", "\n")
+    return hashlib.sha256(normalize_content.encode("utf-8")).hexdigest()
+
+
+def remove_duplicate_documents(documents: list[dict]) -> list[dict]:
+    unique_documents = []
+    seen_contents = set()
+
+    for document in documents:
+        content = document["content"].strip()
+
+        if content in seen_contents:
+            continue
+
+        seen_contents.add(content)
+        unique_documents.append(document)
+
+    return unique_documents
+
+
+@app.get("/")
+def root():
+    return {"message": "Study-RAG Server Running"}
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+@app.get("/db-test")
+def db_test():
+    with get_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT COUNT(*) FROM rag_documents")
+            count = cursor.fetchone()[0]
+
+    return {
+        "status": "connected",
+        "document_count": count
+    }
+
+
+@app.post("/embedding-test")
+async def embedding_test(request: EmbeddingRequest):
+    embedding = await create_embedding(request.text)
+    return {
+        "text": request.text,
+        "dimension": len(embedding),
+        "embedding_preview": embedding[:5]
+    }
+
+
+@app.post("/docuemnts")
+async def create_document(request: DocumentRequest):
+    # 1. 문장을 임베딩 벡터로 변환
+    embedding = await create_embedding(request.content)
+
+    # 2. PostgreSQL 저장
+    with get_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO rag_documents (content, embedding)
+                VALUES (%s, %s::vector)
+                RETURNING id
+                """,
+                (
+                    request.content,
+                    str(embedding)
+                )
+            )
+
+            document_id = cursor.fetchone()[0]
+
+    return {
+        "document_id": document_id,
+        "content": request.content,
+        "embedding_dimension": len(embedding),
+        "status": "saved"
+    }
+
+
+# 여기까지 과정은 RAG의 검색(Retrieval) 구현 완료
+# 다음 과정은 검색된 문서를 Ollama의 qwen3:4b 모델에 전달하여 실제 AI 답변을 생성하도록 한다
+@app.post("/search")
+async def search_document(request: SearchRequest):
+    # 1. 사용자 질문을 임베딩 벡터로 변환
+    query_embedding = await create_embedding(request.question)
+
+    # 2. PostgreSQL에서 유사 문서 검색
+    # <=>는 pgvector의 코사인 거리 연산자입니다.
+    # 두 벡터가 얼마나 유사한 방향을 가리키는지 계산합니다.
+    # 코사인 거리가 작을수록 두 벡터가 유사한 방향을 가리킵니다.
+    with get_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT r.id,
+                       r.content,
+                       r.embedding <=> %s::vector AS distance,
+                       r.source_document_id,
+                       s.filename
+                FROM rag_documents AS r
+                         LEFT JOIN source_documents AS s
+                                   ON r.source_document_id = s.id
+                ORDER BY distance
+                LIMIT 3
+                """,
+                (str(query_embedding),)
+            )
+            rows = cursor.fetchall()
+
+    # 3. 검색 결과 반환
+    documents = []
+
+    for row in rows:
+        documents.append({
+            "id": row[0],
+            "content": row[1],
+            "distance": row[2],
+            "source_document_id": row[3],
+            "filename": row[4]
+        })
+
+    return {
+        "question": request.question,
+        "documents": documents
+    }
+
+
+@app.post("/search/filtered")
+async def search_document_filtered(request: SearchRequest):
+    # 1. 질문 임베딩
+    query_embedding = await create_embedding(request.question)
+
+    # 2. 거리 기준으로 필터링하여 검색
+    with get_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT r.id,
+                       r.content,
+                       r.embedding <=> %s::vector AS distance,
+                       r.source_document_id,
+                       s.filename
+                FROM rag_documents AS r
+                         LEFT JOIN source_documents AS s
+                                   ON r.source_document_id = s.id
+                WHERE r.embedding <=> %s::vector <= %s
+                ORDER BY distance
+                LIMIT 3
+                """,
+                (
+                    str(query_embedding),
+                    str(query_embedding),
+                    0.5
+                )
+            )
+
+            rows = cursor.fetchall()
+
+    # 3. 검색 결과 반환
+    documents = []
+
+    for row in rows:
+        documents.append({
+            "id": row[0],
+            "content": row[1],
+            "distance": row[2],
+            "source_document_id": row[3],
+            "filename": row[4]
+        })
+
+    return {
+        "question": request.question,
+        "documents": documents
+    }
+
+
+@app.post("/chat")
+async def chat(request: SearchRequest):
+    # 1. 사용자 질문을 임베딩 벡터로 변환
+    query_embedding = await create_embedding(request.question)
+
+    # 2. PostgreSQL에서 관련 문서 검색
+    with get_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT r.id,
+                       r.content,
+                       r.embedding <=> %s::vector AS distance,
+                       r.source_document_id,
+                       s.filename
+                FROM rag_documents AS r
+                         LEFT JOIN source_documents AS s
+                                   ON r.source_document_id = s.id
+                ORDER BY distance
+                LIMIT 3
+                """,
+                (str(query_embedding),)
+            )
+            rows = cursor.fetchall()
+
+    # 3. 검색 결과 구성
+    documents = [
+        {
+            "id": row[0],
+            "content": row[1],
+            "distance": row[2],
+            "source_document_id": row[3],
+            "filename": row[4]
+        }
+        for row in rows
+    ]
+
+    # 4. 검색된 문서가 없다면 답변 생성 생략
+    if not documents:
+        return {
+            "question": request.question,
+            "answer": "등록된 문서가 없습니다.",
+            "sources": []
+        }
+
+    # 5. 검색된 문서를 LLM에 전달하여 답변 생성
+    answer = await generate_answer(
+        question=request.question,
+        documents=documents
+    )
+
+    # 6. 최종 결과 반환
+    return {
+        "question": request.question,
+        "answer": answer,
+        "sources": documents
+    }
+
+
+@app.post("/chat/filtered")
+async def chat_document_filtered(request: SearchRequest):
+    # 1. 사용자 질문을 임베딩 벡터로 변환
+    query_embedding = await create_embedding(request.question)
+
+    # 2. 거리 기준을 만족하는 청크 검색
+    with get_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT r.id,
+                       r.content,
+                       r.embedding <=> %s::vector AS distance,
+                       r.source_document_id,
+                       s.filename
+                FROM rag_documents AS r
+                         LEFT JOIN source_documents AS s
+                                   ON r.source_document_id = s.id
+                WHERE r.embedding <=> %s::vector <= %s
+                ORDER BY distance
+                LIMIT 3
+                """,
+                (
+                    str(query_embedding),
+                    str(query_embedding),
+                    0.5
+                )
+            )
+
+            rows = cursor.fetchall()
+
+    # 3. 검색 결과를 문서 목록으로 변환
+    documents = []
+
+    for row in rows:
+        documents.append({
+            "id": row[0],
+            "content": row[1],
+            "distance": row[2],
+            "source_document_id": row[3],
+            "filename": row[4]
+        })
+
+    # 4. 조건에 맞는 청크가 없으면 Ollama를 호출하지 않음
+    if not documents:
+        return {
+            "question": request.question,
+            "answer": "등록된 문서에서 질문과 관련된 정보를 찾지 못했습니다.",
+            "sources": []
+        }
+
+    # 5. 검색된 청크를 Ollama에 전달하여 답변 생성
+    answer = await generate_answer(
+        request.question,
+        documents
+    )
+
+    # 6. AI 답변과 검색된 청크 반환
+    return {
+        "question": request.question,
+        "answer": answer,
+        "sources": documents
+    }
+
+
+from rag import rerank_documents
+
+
+@app.post("/chat/reranked")
+async def chat_document_reranked(request: SearchRequest):
+    # 1. 질문 임베딩
+    query_embedding = await create_embedding(request.question)
+
+    # 2. 거리 기준을 만족하는 청크 검색
+    with get_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT r.id,
+                       r.content,
+                       r.embedding <=> %s::vector AS distance,
+                       r.source_document_id,
+                       s.filename
+                FROM rag_documents AS r
+                         LEFT JOIN source_documents AS s
+                                   ON r.source_document_id = s.id
+                WHERE r.embedding <=> %s::vector <= %s
+                ORDER BY distance
+                LIMIT 3
+                """,
+                (
+                    str(query_embedding),
+                    str(query_embedding),
+                    0.5
+                )
+            )
+
+            rows = cursor.fetchall()
+
+    documents = []
+
+    for row in rows:
+        documents.append({
+            "id": row[0],
+            "content": row[1],
+            "distance": row[2],
+            "source_document_id": row[3],
+            "filename": row[4]
+        })
+
+    # 3. 리랭킹: 질문에 필요한 청크만 선별
+    selected_documents = await rerank_documents(
+        request.question,
+        documents
+    )
+
+    # 4. 선별된 청크가 없으면 답변 생성하지 않음
+    if not selected_documents:
+        return {
+            "question": request.question,
+            "answer": "등록된 문서에서 질문에 답할 수 있는 정보를 찾지 못했습니다.",
+            "sources": []
+        }
+
+    # 5. 선별된 청크로 답변 생성
+    answer = await generate_answer(
+        request.question,
+        selected_documents
+    )
+
+    return {
+        "question": request.question,
+        "answer": answer,
+        "sources": selected_documents
+    }
+
+
+@app.post("/chat/deduplicated")
+async def chat_document_deduplicated(request: SearchRequest):
+    # 1. 질문 임베딩
+    query_embedding = await create_embedding(request.question)
+
+    # 2. 유사 문서 검색
+    with get_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT r.id,
+                       r.content,
+                       r.embedding <=> %s::vector AS distance,
+                       r.source_document_id,
+                       s.filename
+                FROM rag_documents AS r
+                         LEFT JOIN source_documents AS s
+                                   ON r.source_document_id = s.id
+                ORDER BY distance
+                LIMIT 3
+                """,
+                (str(query_embedding),)
+            )
+
+            rows = cursor.fetchall()
+
+    # 3. 검색 결과 변환
+    documents = []
+
+    for row in rows:
+        documents.append({
+            "id": row[0],
+            "content": row[1],
+            "distance": row[2],
+            "source_document_id": row[3],
+            "filename": row[4]
+        })
+
+    # 4. 중복 청크 제거
+    unique_documents = remove_duplicate_documents(documents)
+
+    # 5. 검색 결과가 없으면 답변 생성하지 않음
+    if not unique_documents:
+        return {
+            "question": request.question,
+            "answer": "등록된 문서에서 관련 정보를 찾지 못했습니다.",
+            "sources": []
+        }
+
+    # 6. 중복 제거된 청크로 답변 생성
+    answer = await generate_answer(
+        request.question,
+        unique_documents
+    )
+
+    return {
+        "question": request.question,
+        "answer": answer,
+        "sources": unique_documents
+    }
+
+
+@app.post("/chat/deduplicated-db")
+async def chat_document_deduplicated_db(request: SearchRequest):
+    # 1. 질문 임베딩
+    query_embedding = await create_embedding(request.question)
+
+    # 2. DB에서 중복 제거 후 거리순으로 최대 3개 검색
+    with get_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT d.id,
+                       d.content,
+                       d.distance,
+                       d.source_document_id,
+                       d.filename
+                FROM (SELECT DISTINCT ON (r.content) r.id,
+                                                     r.content,
+                                                     r.embedding <=> %s::vector AS distance,
+                                                     r.source_document_id,
+                                                     s.filename
+                      FROM rag_documents AS r
+                               LEFT JOIN source_documents AS s
+                                         ON r.source_document_id = s.id
+                      ORDER BY r.content, distance, r.id) AS d
+                ORDER BY d.distance, d.id
+                LIMIT 3
+                """,
+                (str(query_embedding),)
+            )
+
+            rows = cursor.fetchall()
+
+    # 3. 검색 결과 변환
+    documents = []
+
+    for row in rows:
+        documents.append({
+            "id": row[0],
+            "content": row[1],
+            "distance": row[2],
+            "source_document_id": row[3],
+            "filename": row[4]
+        })
+
+    # 4. 검색 결과가 없으면 답변 생성하지 않음
+    if not documents:
+        return {
+            "question": request.question,
+            "answer": "등록된 문서에서 관련 정보를 찾지 못했습니다.",
+            "sources": []
+        }
+
+    # 5. 중복 제거된 청크로 답변 생성
+    answer = await generate_answer(
+        request.question,
+        documents
+    )
+
+    return {
+        "question": request.question,
+        "answer": answer,
+        "sources": documents
+    }
+
+
+@app.post("/documents/upload")
+async def upload_document(file: UploadFile = File(...)):
+    # 1. TXT 파일 확인 및 내용 읽기
+    if not file.filename or not file.filename.lower().endswith(".txt"):
+        raise HTTPException(
+            status_code=400,
+            detail="TXT 파일만 업로드할 수 있습니다."
+        )
+
+    # 2. TXT 파일 읽기
+    file_bytes = await file.read()
+
+    try:
+        content = file_bytes.decode("utf-8-sig").strip()
+    except UnicodeDecodeError:
+        raise HTTPException(
+            status_code=400,
+            detail="UTF-8로 인코딩된 TXT 파일을 업로드해 주세요."
+        )
+
+    if not content:
+        raise HTTPException(
+            status_code=400,
+            detail="파일 내용이 비어 있습니다."
+        )
+
+    # 3. 내용을 문단별로 분할
+    chunks = split_text(content)
+
+    # 4. 파일 본문 해시값 생성
+    content_hash = create_content_hash(content)
+
+    # 5. 같은 파일명으로 등록된 문서가 있는지 확인
+    with get_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, content_hash
+                FROM source_documents
+                WHERE filename = %s
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (file.filename,)
+            )
+            existing_document = cursor.fetchone()
+
+    # 6. 기존 문서가 있다면 내용 비교
+    if existing_document:
+        existing_id, existing_hash = existing_document
+
+        # 파일명과 내용이 모두 동일하면 중복 등록 생략
+        if existing_hash == content_hash:
+            return {
+                "filename": file.filename,
+                "source_document_id": existing_id,
+                "status": "skipped",
+                "message": "이미 등록된 동일한 문서입니다."
+            }
+
+        # 파일명은 같지만 내용이 다르면 자동으로 덮어쓰지 않음
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "같은 파일명으로 등록된 문서가 있지만 내용이 다릅니다. "
+                "기존 문서 교체 또는 새 문서 등록을 선택해야 합니다."
+            )
+        )
+
+    # 7. 각 청크의 임베딩 생성
+    embeddings = []
+
+    for chunk in chunks:
+        embedding = await create_embedding(chunk)
+        embeddings.append(embedding)
+
+    # 8. 원본 파일 정보와 청크를 DB에 저장
+    saved_documents = []
+
+    with get_connection() as conn:
+        with conn.cursor() as cursor:
+            # 원본 파일 정보 저장
+            cursor.execute(
+                """
+                INSERT INTO source_documents (filename, content_hash)
+                VALUES (%s, %s)
+                RETURNING id
+                """,
+                (file.filename, content_hash)
+            )
+
+            source_document_id = cursor.fetchone()[0]
+
+            # 각 청크와 임베딩 저장
+            for chunk, embedding in zip(chunks, embeddings):
+                cursor.execute(
+                    """
+                    INSERT INTO rag_documents (source_document_id, content, embedding)
+                    VALUES (%s, %s, %s::vector)
+                    RETURNING id
+                    """,
+                    (
+                        source_document_id,
+                        chunk,
+                        embedding
+                    )
+                )
+
+                document_id = cursor.fetchone()[0]
+
+                saved_documents.append({
+                    "document_id": document_id,
+                    "content": chunk
+                })
+
+    # 9. 저장 결과 반환
+    return {
+        "filename": file.filename,
+        "source_document_id": source_document_id,
+        "chunk_count": len(saved_documents),
+        "documents": saved_documents,
+        "status": "saved"
+    }
+
+
+@app.put("/documents/{source_document_id}")
+async def replace_document(source_document_id: int, file: UploadFile = File(...)):
+    # 1. TXT 파일 확인
+    if not file.filename or not file.filename.lower().endswith(".txt"):
+        raise HTTPException(
+            status_code=400,
+            detail="TXT 파일만 업로드 가능합니다."
+        )
+
+    # 2. 파일 내용 읽기
+    file_bytes = await file.read()
+
+    try:
+        content = file_bytes.decode("utf-8-sig").strip()
+    except UnicodeDecodeError:
+        raise HTTPException(
+            status_code=400,
+            detail="UTF-8로 인코딩된 TXT 파일을 업로드 해주세요."
+        )
+
+    if not content:
+        raise HTTPException(
+            status_code=400,
+            detail="파일 내용이 비어 있습니다."
+        )
+
+    # 3. 기존 문서 조회
+    with get_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT filename, content_hash
+                FROM source_documents
+                WHERE id = %s
+                """,
+                (source_document_id,)
+            )
+
+            existing_document = cursor.fetchone()
+
+    if existing_document is None:
+        raise HTTPException(
+            status_code=404,
+            detail="해당 문서를 찾을 수 없습니다."
+        )
+
+    # 4. 본문 해시 비교
+    new_hash = create_content_hash(content)
+    old_hash = existing_document[1]
+
+    if old_hash == new_hash:
+        return {
+            "source_document_id": source_document_id,
+            "status": "skipped",
+            "message": "기존 문서와 내용일 동일합니다."
+        }
+
+    # 5. 새 문서 분할 및 임베딩 생성
+    chunks = split_text(content)
+
+    embeddings = []
+
+    for chunk in chunks:
+        embedding = await create_embedding(chunk)
+        embeddings.append(embedding)
+
+    # 6. 기존 청크 교체 및 원본 정보 갱신
+    with get_connection() as conn:
+        with conn.cursor() as cursor:
+            # 교체 대상 문서를 잠금
+            cursor.execute(
+                """
+                SELECT id
+                FROM rag_documents
+                WHERE id = %s
+                    FOR UPDATE
+                """,
+                (source_document_id,)
+            )
+
+            if cursor.fetchone() is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="해당 문서를 찾을 수 없습니다."
+                )
+
+            # 기존 청크 삭제
+            cursor.execute(
+                """
+                DELETE
+                FROM rag_documents
+                WHERE source_document_id = %s
+                """,
+                (source_document_id,)
+            )
+
+            # 새 청크 저장
+            saved_documents = []
+
+            for chunk, embedding in zip(chunks, embeddings):
+                cursor.execute(
+                    """
+                    INSERT INTO rag_documents (source_document_id, content, embedding)
+                    VALUES (%s, %s, %s::vector)
+                    RETURNING id
+                    """,
+                    (source_document_id, chunk, str(embedding))
+                )
+
+                document_id = cursor.fetchone()[0]
+
+                saved_documents.append({
+                    "document_id": document_id,
+                    "content": chunk
+                })
+
+            # 원본 문서 정보 갱신
+            cursor.execute(
+                """
+                UPDATE source_documents
+                SET filename     = %s,
+                    content_hash = %s
+                WHERE id = %s
+                """,
+                (file.filename, new_hash, source_document_id)
+            )
+
+        # 7. 교체 결과 반환
+        return {
+            "filename": file.filename,
+            "source_document_id": source_document_id,
+            "chunk_count": len(saved_documents),
+            "documents": saved_documents,
+            "status": "replaced"
+        }
+
+
+@app.delete("/documents/{source_document_id}")
+def delete_document(source_document_id: int):
+    with get_connection() as conn:
+        with conn.cursor() as cursor:
+            # 1. 삭제할 원본 문서 확인
+            cursor.execute(
+                """
+                SELECT id, filename
+                FROM source_documents
+                WHERE id = %s
+                    FOR UPDATE
+                """,
+                (source_document_id,)
+            )
+
+            document = cursor.fetchone()
+
+            if document is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="해당 문서를 찾을 수 없습니다."
+                )
+
+            # 2. 연결된 청크 삭제
+            cursor.execute(
+                """
+                DELETE
+                FROM rag_documents
+                WHERE source_document_id = %s
+                """,
+                (source_document_id,)
+            )
+
+            deleted_chunk_count = cursor.rowcount
+
+            # 3. 원본 문서 삭제
+            cursor.execute(
+                """
+                DELETE
+                FROM source_documents
+                WHERE id = %s
+                """,
+                (source_document_id,)
+            )
+
+    return {
+        "source_document_id": source_document_id,
+        "filename": document[1],
+        "deleted_chunk_count": deleted_chunk_count,
+        "status": "deleted"
+    }
+
+
+@app.get("/documents")
+def get_documents():
+    with get_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT s.id, s.filename, s.inserted, COUNT(r.id) as chunk_count
+                FROM source_documents as s
+                         LEFT JOIN rag_documents as r
+                                   ON r.source_document_id = s.id
+                GROUP BY s.id
+                ORDER BY s.id DESC
+                """
+            )
+
+            rows = cursor.fetchall()
+
+    return {
+        "total": len(rows),
+        "documents": [
+            {
+                "source_document_id": row[0],
+                "filename": row[1],
+                "inserted": row[2],
+                "chunk_count": row[3]
+            }
+            for row in rows
+        ]
+    }
+
+
+@app.get("/documents/{source_document_id}")
+def get_document(source_document_id: int):
+    with get_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, filename, content_hash, inserted
+                FROM source_documents
+                WHERE id = %s
+                """,
+                (source_document_id,)
+            )
+
+            document = cursor.fetchone()
+
+            if document is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="해당 문서를 찾을 수 없습니다."
+                )
+
+            # 해당 문서에 연결된 청크 조회
+            cursor.execute(
+                """
+                SELECT id, content
+                FROM rag_documents
+                WHERE source_document_id = %s
+                ORDER BY id
+                """,
+                (source_document_id,)
+            )
+
+            chunks = cursor.fetchall()
+
+    return {
+        "source_document_id": document[0],
+        "filename": document[1],
+        "content_hash": document[2],
+        "inserted": document[3],
+        "chunk_count": len(chunks),
+        "chunks": [
+            {
+                "chunk_id": chunk[0],
+                "content": chunk[1]
+            }
+            for chunk in chunks
+        ]
+    }

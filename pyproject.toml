@@ -1,0 +1,12 @@
+[project]
+name = "study-rag"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi[standard]>=0.141.1",
+    "httpx>=0.28.1",
+    "psycopg[binary]>=3.3.6",
+    "pydantic>=2.13.5",
+    "python-dotenv>=1.2.3",
+    "python-multipart>=0.0.32",
+]

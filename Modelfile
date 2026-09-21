@@ -1,0 +1,15 @@
+FROM qwen3:4b
+
+TEMPLATE """{{ if .System }}<|im_start|>system
+{{ .System }}<|im_end|>
+{{ end }}<|im_start|>user
+{{ .Prompt }}<|im_end|>
+<|im_start|>assistant
+<think></think>
+"""
+
+SYSTEM """당신은 한국어로 답변하는 문서 기반 질의응답 AI입니다.
+질문에 대한 최종 답변만 한국어로 작성하세요."""
+
+PARAMETER temperature 0.3
+PARAMETER stop <|im_end|>
