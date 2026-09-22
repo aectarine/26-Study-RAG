@@ -50,8 +50,9 @@ RAG의 핵심 과정을 직접 구현하고 검색 방식에 따른 품질과 �
 | PostgreSQL/pgvector | Docker Desktop에서 실행 | 사용자 확인 |
 | Ollama | Windows에 직접 설치 | 사용자 확인 |
 | Ollama 주소 | `http://localhost:11434` | `embedding.py`, `rag.py` |
-| 임베딩 모델 | `embeddinggemma` | `embedding.py` |
-| 답변 생성 모델 | `qwen2.5:3b` | `rag.py` |
+| 임베딩 모델 | `embeddinggemma` | `embedding.py`, Ollama 설치 상태 별도 확인 필요 |
+| 답변 생성 모델 | `qwen2.5:3b` | 현재 `rag.py` 설정 |
+| 추론 답변 모델 | `study-rag-llm:latest` | Ollama 설치 확인, 코드 전환 필요 |
 | 리랭킹 모델 | `qwen3:4b` | `rag.py` |
 | Python | 3.14 이상 | `pyproject.toml` |
 
@@ -66,6 +67,19 @@ DB_PASSWORD
 ```
 
 비밀번호와 실제 접속 값은 README에 기록하지 않습니다.
+
+### Ollama 모델 구성
+
+현재 Windows Ollama에 확인된 모델은 다음과 같습니다.
+
+| 모델 | 역할 | 상태 |
+|---|---|---|
+| `study-rag-llm:latest` | 추론 기능을 포함한 최종 답변 생성 후보 | 설치 확인 |
+| `qwen3:4b` | 리랭킹 및 `study-rag-llm`의 기반 모델 | 설치 확인 |
+| `qwen2.5:3b` | 현재 코드에서 사용하는 답변 생성 모델 | 설치 확인 |
+| `embeddinggemma` | 질문·문서 임베딩 생성 | 코드 설정 확인, 설치 상태 확인 필요 |
+
+`Modelfile`은 `qwen3:4b`를 기반으로 한국어 문서 기반 답변 시스템 프롬프트와 `temperature 0.3`을 설정합니다. `study-rag-llm:latest`를 실제 답변 생성에 사용하려면 `rag.py`의 `LLM_MODEL`을 변경하고, 추론 응답에 대한 출력 처리를 함께 검증해야 합니다.
 
 ## 3. 전체 처리 흐름
 
@@ -273,6 +287,7 @@ ollama list
 embeddinggemma
 qwen2.5:3b
 qwen3:4b
+study-rag-llm:latest
 ```
 
 ### FastAPI 실행
@@ -379,6 +394,8 @@ http://127.0.0.1:8000/docs
 | 전체 응답 시간 측정 | 완료 | `X-Process-Time` |
 | 검색 로직 공통화 | 완료 | `retrieve_documents()`로 검색 전략 통합 |
 | 의미상 중복 제거·리랭킹 | 완료 | `/chat/deduplicated-semantic-reranked` |
+| 추론 답변 모델 설치 | 완료 | `study-rag-llm:latest` 설치 확인 |
+| 추론 답변 모델 코드 전환 | 미완료 | 현재 `rag.py`는 `qwen2.5:3b` 사용 |
 | 테스트·운영 라우터 분리 | 미완료 | 다음 구조 개선 작업 |
 | 검색 품질 자동 평가 | 미완료 | 테스트 데이터 필요 |
 | 검색 벤치마크 | 완료 | `test_search_benchmark.py`, 5회 반복 측정 |
@@ -392,6 +409,7 @@ http://127.0.0.1:8000/docs
 | 1단계 | 테이블 구조·벡터 차원·인덱스 확인 | 높음 | 미완료 | DB 접속 또는 마이그레이션 필요 |
 | 1단계 | FastAPI 실제 실행 명령과 포트 확인 | 높음 | 미완료 | 로컬 환경에서 검증 |
 | 1단계 | 테스트·운영 라우터 분리 | 높음 | 미완료 | `/test/chat/*`와 `/chat` 구조로 이동 |
+| 1단계 | `study-rag-llm:latest`를 답변 생성에 연결 | 높음 | 미완료 | `rag.py` 모델 설정과 추론 출력 검증 |
 | 2단계 | 검색 SQL과 결과 변환 로직 공통화 | 높음 | 완료 | `retrieve_documents()`와 `row_to_document()` 구현 |
 | 2단계 | 검색 전략을 공통 함수 옵션으로 통합 | 높음 | 완료 | `basic`, `filtered`, `deduplicated`, `deduplicated-db` 지원 |
 | 2단계 | 운영용 기본 전략을 `/chat`에 연결 | 높음 | 미완료 | `/chat/filtered` 또는 의미상 중복·리랭킹 선택 |
@@ -413,13 +431,15 @@ http://127.0.0.1:8000/docs
 1. Docker Desktop의 PostgreSQL/pgvector 컨테이너명과 포트 확인
 2. DB에 접속해 두 테이블의 실제 스키마·벡터 차원·인덱스 확인
 3. `/health`와 `/db-test`로 FastAPI와 DB 연결 검증
-4. 현재 검색 엔드포인트를 `/test/chat/*` 라우터로 분리
-5. 벤치마크가 `/test/chat/*` 실험 API를 호출하도록 경로 정리
-6. 검증된 기본 전략을 운영용 `/chat`에 연결
-7. 질문 유형별 기대 출처와 자동화 테스트 작성
-8. 문서에 없는 질문의 거절 응답 검증
-9. `X-Process-Time`과 단계별 시간을 이용해 성능 비교
-10. 운영 API의 응답 형식과 오류 처리 안정화
+4. `study-rag-llm:latest`를 답변 생성 모델로 연결
+5. 추론 응답에 `<think>` 또는 모델별 출력 형식이 섞이지 않는지 검증
+6. 현재 검색 엔드포인트를 `/test/chat/*` 라우터로 분리
+7. 벤치마크가 `/test/chat/*` 실험 API를 호출하도록 경로 정리
+8. 검증된 기본 전략을 운영용 `/chat`에 연결
+9. 질문 유형별 기대 출처와 자동화 테스트 작성
+10. 문서에 없는 질문의 거절 응답 검증
+11. `X-Process-Time`과 단계별 시간을 이용해 성능 비교
+12. 운영 API의 응답 형식과 오류 처리 안정화
 
 검색 로직 공통화와 검색 전략 실험은 완료했습니다. 이제 테스트 API와 운영 API를 라우터 기준으로 분리하고, `/chat`에는 검증된 전략만 노출합니다.
 
@@ -430,6 +450,8 @@ http://127.0.0.1:8000/docs
 - `embedding` 벡터 차원과 인덱스 구성
 - FastAPI 실제 실행 포트
 - Ollama 모델 설치 상태
+- `study-rag-llm:latest`의 실제 생성 응답과 추론 출력 형식
+- `rag.py`의 답변 생성 모델 전환 여부
 - 자동화 테스트 프레임워크와 실행 방식
 - 단계별 성능 로그 저장 방식
 - 문서 교체 API의 DB 무결성 검증
