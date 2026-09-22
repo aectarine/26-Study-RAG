@@ -7,7 +7,14 @@ from pydantic import BaseModel
 
 from database import get_connection
 from embedding import create_embedding
-from rag import generate_answer
+from rag import generate_answer, rerank_documents
+
+# 검색 결과 개수
+SEARCH_LIMIT = 3
+CANDIDATE_LIMIT = 5
+# 거리 필터링 기준
+DISTANCE_THRESHOLD = 0.5
+DUPLICATE_DISTANCE_THRESHOLD = 0.1
 
 
 class EmbeddingRequest(BaseModel):
@@ -79,6 +86,206 @@ def remove_duplicate_documents(documents: list[dict]) -> list[dict]:
     return unique_documents
 
 
+def row_to_document(row: tuple) -> dict:
+    """DB 검색 결과를 문서 형식으로 변환합니다."""
+    return {
+        "id": row[0],
+        "content": row[1],
+        "distance": row[2],
+        "source_document_id": row[3],
+        "filename": row[4],
+    }
+
+
+async def retrieve_documents(
+        question: str,
+        strategy: str = "basic",
+) -> list[dict]:
+    """
+    검색 전략에 따라 관련 문서를 조회합니다.
+
+    검색 전략:
+    - basic:
+        질문과 가까운 청크를 거리순으로 검색합니다.
+
+    - filtered:
+        코사인 거리가 DISTANCE_THRESHOLD 이하인 청크만 검색합니다.
+
+    - deduplicated:
+        상위 검색 결과를 가져온 뒤 Python에서 content 중복을 제거합니다.
+
+    - deduplicated-db:
+        PostgreSQL의 DISTINCT ON으로 DB에서 content 중복을 제거한 뒤
+        거리순으로 정렬합니다.
+    """
+
+    allowed_strategies = {
+        "basic",
+        "filtered",
+        "deduplicated",
+        "deduplicated-db",
+        "semantic-deduplicated"
+    }
+
+    if strategy not in allowed_strategies:
+        raise ValueError(
+            f"지원하지 않는 검색 전략입니다: {strategy}"
+        )
+
+    query_embedding = await create_embedding(question)
+    embedding_value = str(query_embedding)
+
+    # --------------------------------------------------
+    # DB 중복 제거 검색
+    # --------------------------------------------------
+    if strategy == "semantic-deduplicated":
+        query = """
+                WITH candidates AS (SELECT r.id,
+                                           r.content,
+                                           r.embedding,
+                                           r.embedding <=> %s::vector AS query_distance,
+                                           r.source_document_id,
+                                           s.filename
+                                    FROM rag_documents AS r
+                                             LEFT JOIN source_documents AS s
+                                                       ON r.source_document_id = s.id
+                                    ORDER BY query_distance
+                                    LIMIT %s),
+                     duplicate_pairs AS (SELECT a.id             AS first_id,
+                                                b.id             AS second_id,
+                                                a.query_distance AS first_query_distance,
+                                                b.query_distance AS second_query_distance
+                                         FROM candidates AS a
+                                                  CROSS JOIN candidates AS b
+                                         WHERE a.id < b.id
+                                           AND a.embedding <=> b.embedding <= %s),
+                     removed_documents AS (SELECT CASE
+                                                      WHEN first_query_distance <= second_query_distance
+                                                          THEN second_id
+                                                      ELSE first_id
+                                                      END AS remove_id
+                                           FROM duplicate_pairs)
+                SELECT id,
+                       content,
+                       query_distance AS distance,
+                       source_document_id,
+                       filename
+                FROM candidates
+                WHERE id NOT IN (SELECT remove_id
+                                 FROM removed_documents)
+                ORDER BY query_distance
+                LIMIT %s
+                """
+
+        query_parameters = (
+            embedding_value,
+            CANDIDATE_LIMIT,
+            DUPLICATE_DISTANCE_THRESHOLD,
+            SEARCH_LIMIT
+        )
+    elif strategy == "deduplicated-db":
+        query = """
+                SELECT d.id,
+                       d.content,
+                       d.distance,
+                       d.source_document_id,
+                       d.filename
+                FROM (SELECT DISTINCT ON (r.content) r.id,
+                                                     r.content,
+                                                     r.embedding <=> %s::vector AS distance,
+                                                     r.source_document_id,
+                                                     s.filename
+                      FROM rag_documents AS r
+                               LEFT JOIN source_documents AS s
+                                         ON r.source_document_id = s.id
+                      ORDER BY r.content,
+                               distance,
+                               r.id) AS d
+                ORDER BY d.distance,
+                         d.id
+                LIMIT %s \
+                """
+
+        query_parameters = (
+            embedding_value,
+            SEARCH_LIMIT,
+        )
+
+    # --------------------------------------------------
+    # 거리 필터링 검색
+    # --------------------------------------------------
+    elif strategy == "filtered":
+        query = """
+                SELECT r.id,
+                       r.content,
+                       r.embedding <=> %s::vector AS distance,
+                       r.source_document_id,
+                       s.filename
+                FROM rag_documents AS r
+                         LEFT JOIN source_documents AS s
+                                   ON r.source_document_id = s.id
+                WHERE r.embedding <=> %s::vector <= %s
+                ORDER BY distance
+                LIMIT %s \
+                """
+
+        query_parameters = (
+            embedding_value,
+            embedding_value,
+            DISTANCE_THRESHOLD,
+            SEARCH_LIMIT,
+        )
+
+    # --------------------------------------------------
+    # 기본 검색 및 Python 중복 제거용 검색
+    # --------------------------------------------------
+    else:
+        query = """
+                SELECT r.id,
+                       r.content,
+                       r.embedding <=> %s::vector AS distance,
+                       r.source_document_id,
+                       s.filename
+                FROM rag_documents AS r
+                         LEFT JOIN source_documents AS s
+                                   ON r.source_document_id = s.id
+                ORDER BY distance
+                LIMIT %s \
+                """
+
+        query_parameters = (
+            embedding_value,
+            SEARCH_LIMIT,
+        )
+
+    # --------------------------------------------------
+    # PostgreSQL 검색 실행
+    # --------------------------------------------------
+    with get_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                query,
+                query_parameters,
+            )
+            rows = cursor.fetchall()
+
+    # --------------------------------------------------
+    # DB 결과를 API 응답 형식으로 변환
+    # --------------------------------------------------
+    documents = [
+        row_to_document(row)
+        for row in rows
+    ]
+
+    # --------------------------------------------------
+    # Python 중복 제거
+    # --------------------------------------------------
+    if strategy == "deduplicated":
+        documents = remove_duplicate_documents(documents)
+
+    return documents
+
+
 @app.get("/")
 def root():
     return {"message": "Study-RAG Server Running"}
@@ -146,44 +353,7 @@ async def create_document(request: DocumentRequest):
 # 다음 과정은 검색된 문서를 Ollama의 qwen3:4b 모델에 전달하여 실제 AI 답변을 생성하도록 한다
 @app.post("/search")
 async def search_document(request: SearchRequest):
-    # 1. 사용자 질문을 임베딩 벡터로 변환
-    query_embedding = await create_embedding(request.question)
-
-    # 2. PostgreSQL에서 유사 문서 검색
-    # <=>는 pgvector의 코사인 거리 연산자입니다.
-    # 두 벡터가 얼마나 유사한 방향을 가리키는지 계산합니다.
-    # 코사인 거리가 작을수록 두 벡터가 유사한 방향을 가리킵니다.
-    with get_connection() as conn:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT r.id,
-                       r.content,
-                       r.embedding <=> %s::vector AS distance,
-                       r.source_document_id,
-                       s.filename
-                FROM rag_documents AS r
-                         LEFT JOIN source_documents AS s
-                                   ON r.source_document_id = s.id
-                ORDER BY distance
-                LIMIT 3
-                """,
-                (str(query_embedding),)
-            )
-            rows = cursor.fetchall()
-
-    # 3. 검색 결과 반환
-    documents = []
-
-    for row in rows:
-        documents.append({
-            "id": row[0],
-            "content": row[1],
-            "distance": row[2],
-            "source_document_id": row[3],
-            "filename": row[4]
-        })
-
+    documents = await retrieve_documents(request.question, "basic")
     return {
         "question": request.question,
         "documents": documents
@@ -192,47 +362,7 @@ async def search_document(request: SearchRequest):
 
 @app.post("/search/filtered")
 async def search_document_filtered(request: SearchRequest):
-    # 1. 질문 임베딩
-    query_embedding = await create_embedding(request.question)
-
-    # 2. 거리 기준으로 필터링하여 검색
-    with get_connection() as conn:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT r.id,
-                       r.content,
-                       r.embedding <=> %s::vector AS distance,
-                       r.source_document_id,
-                       s.filename
-                FROM rag_documents AS r
-                         LEFT JOIN source_documents AS s
-                                   ON r.source_document_id = s.id
-                WHERE r.embedding <=> %s::vector <= %s
-                ORDER BY distance
-                LIMIT 3
-                """,
-                (
-                    str(query_embedding),
-                    str(query_embedding),
-                    0.5
-                )
-            )
-
-            rows = cursor.fetchall()
-
-    # 3. 검색 결과 반환
-    documents = []
-
-    for row in rows:
-        documents.append({
-            "id": row[0],
-            "content": row[1],
-            "distance": row[2],
-            "source_document_id": row[3],
-            "filename": row[4]
-        })
-
+    documents = await retrieve_documents(request.question, "filtered")
     return {
         "question": request.question,
         "documents": documents
@@ -241,42 +371,8 @@ async def search_document_filtered(request: SearchRequest):
 
 @app.post("/chat")
 async def chat(request: SearchRequest):
-    # 1. 사용자 질문을 임베딩 벡터로 변환
-    query_embedding = await create_embedding(request.question)
+    documents = await retrieve_documents(request.question, "basic")
 
-    # 2. PostgreSQL에서 관련 문서 검색
-    with get_connection() as conn:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT r.id,
-                       r.content,
-                       r.embedding <=> %s::vector AS distance,
-                       r.source_document_id,
-                       s.filename
-                FROM rag_documents AS r
-                         LEFT JOIN source_documents AS s
-                                   ON r.source_document_id = s.id
-                ORDER BY distance
-                LIMIT 3
-                """,
-                (str(query_embedding),)
-            )
-            rows = cursor.fetchall()
-
-    # 3. 검색 결과 구성
-    documents = [
-        {
-            "id": row[0],
-            "content": row[1],
-            "distance": row[2],
-            "source_document_id": row[3],
-            "filename": row[4]
-        }
-        for row in rows
-    ]
-
-    # 4. 검색된 문서가 없다면 답변 생성 생략
     if not documents:
         return {
             "question": request.question,
@@ -284,13 +380,8 @@ async def chat(request: SearchRequest):
             "sources": []
         }
 
-    # 5. 검색된 문서를 LLM에 전달하여 답변 생성
-    answer = await generate_answer(
-        question=request.question,
-        documents=documents
-    )
+    answer = await generate_answer(question=request.question, documents=documents)
 
-    # 6. 최종 결과 반환
     return {
         "question": request.question,
         "answer": answer,
@@ -300,48 +391,8 @@ async def chat(request: SearchRequest):
 
 @app.post("/chat/filtered")
 async def chat_document_filtered(request: SearchRequest):
-    # 1. 사용자 질문을 임베딩 벡터로 변환
-    query_embedding = await create_embedding(request.question)
+    documents = await retrieve_documents(request.question, "filtered")
 
-    # 2. 거리 기준을 만족하는 청크 검색
-    with get_connection() as conn:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT r.id,
-                       r.content,
-                       r.embedding <=> %s::vector AS distance,
-                       r.source_document_id,
-                       s.filename
-                FROM rag_documents AS r
-                         LEFT JOIN source_documents AS s
-                                   ON r.source_document_id = s.id
-                WHERE r.embedding <=> %s::vector <= %s
-                ORDER BY distance
-                LIMIT 3
-                """,
-                (
-                    str(query_embedding),
-                    str(query_embedding),
-                    0.5
-                )
-            )
-
-            rows = cursor.fetchall()
-
-    # 3. 검색 결과를 문서 목록으로 변환
-    documents = []
-
-    for row in rows:
-        documents.append({
-            "id": row[0],
-            "content": row[1],
-            "distance": row[2],
-            "source_document_id": row[3],
-            "filename": row[4]
-        })
-
-    # 4. 조건에 맞는 청크가 없으면 Ollama를 호출하지 않음
     if not documents:
         return {
             "question": request.question,
@@ -349,11 +400,7 @@ async def chat_document_filtered(request: SearchRequest):
             "sources": []
         }
 
-    # 5. 검색된 청크를 Ollama에 전달하여 답변 생성
-    answer = await generate_answer(
-        request.question,
-        documents
-    )
+    answer = await generate_answer(request.question, documents)
 
     # 6. AI 답변과 검색된 청크 반환
     return {
@@ -363,58 +410,15 @@ async def chat_document_filtered(request: SearchRequest):
     }
 
 
-from rag import rerank_documents
-
-
 @app.post("/chat/reranked")
 async def chat_document_reranked(request: SearchRequest):
-    # 1. 질문 임베딩
-    query_embedding = await create_embedding(request.question)
+    documents = await retrieve_documents(request.question, "filtered")
 
-    # 2. 거리 기준을 만족하는 청크 검색
-    with get_connection() as conn:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT r.id,
-                       r.content,
-                       r.embedding <=> %s::vector AS distance,
-                       r.source_document_id,
-                       s.filename
-                FROM rag_documents AS r
-                         LEFT JOIN source_documents AS s
-                                   ON r.source_document_id = s.id
-                WHERE r.embedding <=> %s::vector <= %s
-                ORDER BY distance
-                LIMIT 3
-                """,
-                (
-                    str(query_embedding),
-                    str(query_embedding),
-                    0.5
-                )
-            )
-
-            rows = cursor.fetchall()
-
-    documents = []
-
-    for row in rows:
-        documents.append({
-            "id": row[0],
-            "content": row[1],
-            "distance": row[2],
-            "source_document_id": row[3],
-            "filename": row[4]
-        })
-
-    # 3. 리랭킹: 질문에 필요한 청크만 선별
     selected_documents = await rerank_documents(
         request.question,
         documents
     )
 
-    # 4. 선별된 청크가 없으면 답변 생성하지 않음
     if not selected_documents:
         return {
             "question": request.question,
@@ -422,7 +426,6 @@ async def chat_document_reranked(request: SearchRequest):
             "sources": []
         }
 
-    # 5. 선별된 청크로 답변 생성
     answer = await generate_answer(
         request.question,
         selected_documents
@@ -437,111 +440,8 @@ async def chat_document_reranked(request: SearchRequest):
 
 @app.post("/chat/deduplicated")
 async def chat_document_deduplicated(request: SearchRequest):
-    # 1. 질문 임베딩
-    query_embedding = await create_embedding(request.question)
+    documents = await retrieve_documents(request.question, "deduplicated")
 
-    # 2. 유사 문서 검색
-    with get_connection() as conn:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT r.id,
-                       r.content,
-                       r.embedding <=> %s::vector AS distance,
-                       r.source_document_id,
-                       s.filename
-                FROM rag_documents AS r
-                         LEFT JOIN source_documents AS s
-                                   ON r.source_document_id = s.id
-                ORDER BY distance
-                LIMIT 3
-                """,
-                (str(query_embedding),)
-            )
-
-            rows = cursor.fetchall()
-
-    # 3. 검색 결과 변환
-    documents = []
-
-    for row in rows:
-        documents.append({
-            "id": row[0],
-            "content": row[1],
-            "distance": row[2],
-            "source_document_id": row[3],
-            "filename": row[4]
-        })
-
-    # 4. 중복 청크 제거
-    unique_documents = remove_duplicate_documents(documents)
-
-    # 5. 검색 결과가 없으면 답변 생성하지 않음
-    if not unique_documents:
-        return {
-            "question": request.question,
-            "answer": "등록된 문서에서 관련 정보를 찾지 못했습니다.",
-            "sources": []
-        }
-
-    # 6. 중복 제거된 청크로 답변 생성
-    answer = await generate_answer(
-        request.question,
-        unique_documents
-    )
-
-    return {
-        "question": request.question,
-        "answer": answer,
-        "sources": unique_documents
-    }
-
-
-@app.post("/chat/deduplicated-db")
-async def chat_document_deduplicated_db(request: SearchRequest):
-    # 1. 질문 임베딩
-    query_embedding = await create_embedding(request.question)
-
-    # 2. DB에서 중복 제거 후 거리순으로 최대 3개 검색
-    with get_connection() as conn:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT d.id,
-                       d.content,
-                       d.distance,
-                       d.source_document_id,
-                       d.filename
-                FROM (SELECT DISTINCT ON (r.content) r.id,
-                                                     r.content,
-                                                     r.embedding <=> %s::vector AS distance,
-                                                     r.source_document_id,
-                                                     s.filename
-                      FROM rag_documents AS r
-                               LEFT JOIN source_documents AS s
-                                         ON r.source_document_id = s.id
-                      ORDER BY r.content, distance, r.id) AS d
-                ORDER BY d.distance, d.id
-                LIMIT 3
-                """,
-                (str(query_embedding),)
-            )
-
-            rows = cursor.fetchall()
-
-    # 3. 검색 결과 변환
-    documents = []
-
-    for row in rows:
-        documents.append({
-            "id": row[0],
-            "content": row[1],
-            "distance": row[2],
-            "source_document_id": row[3],
-            "filename": row[4]
-        })
-
-    # 4. 검색 결과가 없으면 답변 생성하지 않음
     if not documents:
         return {
             "question": request.question,
@@ -549,11 +449,28 @@ async def chat_document_deduplicated_db(request: SearchRequest):
             "sources": []
         }
 
-    # 5. 중복 제거된 청크로 답변 생성
-    answer = await generate_answer(
-        request.question,
-        documents
-    )
+    # 6. 중복 제거된 청크로 답변 생성
+    answer = await generate_answer(request.question, documents)
+
+    return {
+        "question": request.question,
+        "answer": answer,
+        "sources": documents
+    }
+
+
+@app.post("/chat/deduplicated-db")
+async def chat_document_deduplicated_db(request: SearchRequest):
+    documents = await retrieve_documents(request.question, "deduplicated-db")
+
+    if not documents:
+        return {
+            "question": request.question,
+            "answer": "등록된 문서에서 관련 정보를 찾지 못했습니다.",
+            "sources": []
+        }
+
+    answer = await generate_answer(request.question, documents)
 
     return {
         "question": request.question,
@@ -955,4 +872,65 @@ def get_document(source_document_id: int):
             }
             for chunk in chunks
         ]
+    }
+
+
+@app.post("/chat/deduplicated-semantic")
+async def chat_document_deduplicated_semantic(
+        request: SearchRequest
+):
+    documents = await retrieve_documents(
+        request.question,
+        "semantic-deduplicated"
+    )
+
+    if not documents:
+        return {
+            "question": request.question,
+            "answer": "등록된 문서에서 관련 정보를 찾지 못했습니다.",
+            "sources": []
+        }
+
+    answer = await generate_answer(
+        request.question,
+        documents
+    )
+
+    return {
+        "question": request.question,
+        "answer": answer,
+        "sources": documents
+    }
+
+
+@app.post("/chat/deduplicated-semantic-reranked")
+async def chat_document_deduplicated_semantic_reranked(
+        request: SearchRequest
+):
+    documents = await retrieve_documents(
+        request.question,
+        "semantic-deduplicated"
+    )
+
+    selected_documents = await rerank_documents(
+        request.question,
+        documents
+    )
+
+    if not selected_documents:
+        return {
+            "question": request.question,
+            "answer": "등록된 문서에서 질문에 답할 수 있는 정보를 찾지 못했습니다.",
+            "sources": []
+        }
+
+    answer = await generate_answer(
+        request.question,
+        selected_documents
+    )
+
+    return {
+        "question": request.question,
+        "answer": answer,
+        "sources": selected_documents
     }

@@ -116,10 +116,35 @@ async def rerank_documents(question: str, documents: list[dict]) -> list[dict]:
         response.raise_for_status()
         result = response.json()
 
-    selected_ids = json.loads(result["response"])["selected_ids"]
+    raw_response = result.get("response", "")
+
+    try:
+        rerank_result = json.loads(raw_response)
+    except json.JSONDecodeError:
+        print(f"리랭킹 JSON 파싱 실패: {raw_response}")
+        return []
+
+    selected_ids = rerank_result.get("selected_ids", [])
+
+    if not isinstance(selected_ids, list):
+        print(f"리랭킹 selected_ids 형식 오류: {selected_ids}")
+        return []
 
     # 모델이 반환한 ID 중 실제 검색 결과에 존재하는 ID만 사용
-    selected_ids = set(selected_ids)
+    available_ids = {
+        document["id"]
+        for document in documents
+    }
+
+    normalized_ids = set()
+
+    for selected_id in selected_ids:
+        try:
+            normalized_ids.add(int(selected_id))
+        except (TypeError, ValueError):
+            continue
+
+    selected_ids = normalized_ids & available_ids
 
     return [
         document
