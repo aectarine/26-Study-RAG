@@ -68,6 +68,10 @@ def send_request(client: httpx.Client, endpoint: str, run_number: int) -> dict:
             "status_code": response.status_code,
             "elapsed_time": elapsed_time,
             "process_time": response.headers.get("X-Process-Time"),
+            "embedding_time": response.headers.get("X-Embedding-Time"),
+            "db_time": response.headers.get("X-DB-Time"),
+            "rerank_time": response.headers.get("X-Rerank-Time"),
+            "answer_time": response.headers.get("X-Answer-Time"),
             "source_count": len(sources),
             "duplicate_count": count_duplicate_contents(sources),
             "source_ids": source_ids,
@@ -80,6 +84,10 @@ def send_request(client: httpx.Client, endpoint: str, run_number: int) -> dict:
             "status_code": None,
             "elapsed_time": None,
             "process_time": None,
+            "embedding_time": None,
+            "db_time": None,
+            "rerank_time": None,
+            "answer_time": None,
             "source_count": 0,
             "duplicate_count": 0,
             "source_ids": [],
@@ -127,6 +135,10 @@ def run_benchmark() -> list[dict]:
                 "minimum_time": minimum_time,
                 "maximum_time": maximum_time,
                 "process_time": latest_result["process_time"],
+                "embedding_time": latest_result["embedding_time"],
+                "db_time": latest_result["db_time"],
+                "rerank_time": latest_result["rerank_time"],
+                "answer_time": latest_result["answer_time"],
                 "source_count": latest_result["source_count"],
                 "duplicate_count": latest_result["duplicate_count"],
                 "source_ids": latest_result["source_ids"],
@@ -147,38 +159,46 @@ def print_results(results: list[dict]) -> None:
     print(f"질문: {QUESTION}")
     print(f"반복 횟수: {RUN_COUNT}")
     print()
-    print("=" * 125)
+    print("=" * 175)
     print(
-        f"{'Endpoint':<25}"
+        f"{'Endpoint':<33}"
         f"{'Status':>8}"
         f"{'Average':>12}"
         f"{'Median':>12}"
         f"{'StdDev':>12}"
         f"{'Minimum':>12}"
         f"{'Maximum':>12}"
-        f"{'Header':>12}"
+        f"{'Total':>10}"
+        f"{'Embed':>10}"
+        f"{'DB':>10}"
+        f"{'Rerank':>10}"
+        f"{'Answer':>10}"
         f"{'Sources':>10}"
         f"{'Duplicate':>12}"
         f"  Source IDs"
     )
-    print("=" * 125)
+    print("=" * 175)
 
     for result in results:
         print(
-            f"{result['endpoint']:<25}"
+            f"{result['endpoint']:<33}"
             f"{str(result['status_code']):>8}"
             f"{format_time(result['average_time']):>12}"
             f"{format_time(result['median_time']):>12}"
             f"{format_time(result['standard_deviation']):>12}"
             f"{format_time(result['minimum_time']):>12}"
             f"{format_time(result['maximum_time']):>12}"
-            f"{(result['process_time'] or '-'):>12}"
+            f"{(result['process_time'] or '-'):>10}"
+            f"{(result['embedding_time'] or '-'):>10}"
+            f"{(result['db_time'] or '-'):>10}"
+            f"{(result['rerank_time'] or '-'):>10}"
+            f"{(result['answer_time'] or '-'):>10}"
             f"{result['source_count']:>10}"
             f"{result['duplicate_count']:>12}"
             f"  {result['source_ids']}"
         )
 
-    print("=" * 125)
+    print("=" * 175)
     print()
 
     for result in results:

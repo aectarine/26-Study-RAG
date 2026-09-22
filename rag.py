@@ -1,9 +1,12 @@
 import json
+import time
 
 import httpx
 
 OLLAMA_URL = "http://localhost:11434"
 LLM_MODEL = "qwen2.5:3b"
+
+
 # LLM_MODEL = "study-rag-llm:latest"
 
 
@@ -19,7 +22,7 @@ def print_ollama_metrics(prefix: str, data: dict) -> None:
     print(f"{prefix}: {metrics}")
 
 
-async def generate_answer(question: str, documents: list[dict]) -> str:
+async def generate_answer(question: str, documents: list[dict], timings: dict[str, float] | None = None) -> str:
     """
     검색된 문서를 참고하여 AI 답변을 생성합니다.
     """
@@ -49,6 +52,8 @@ async def generate_answer(question: str, documents: list[dict]) -> str:
 [답변]
 """
 
+    answer_started_at = time.perf_counter()
+
     # 3. OLLAMA LLM 호출
     async with httpx.AsyncClient(timeout=180.0) as client:
         response = await client.post(
@@ -68,20 +73,28 @@ async def generate_answer(question: str, documents: list[dict]) -> str:
         )
         response.raise_for_status()
         data = response.json()
-        print_ollama_metrics("답변 생성 Ollama 성능", data)
 
-        # 4. AI가 생성한 응답
-        answer = data["response"]
+    if timings is not None:
+        timings["answer-time"] = time.perf_counter() - answer_started_at
 
-        # 5. 추론 내용이 포함된 경우 제거
-        if "</think>" in answer:
-            answer = answer.split("</think>", 1)[1]
+    print_ollama_metrics("답변 생성 Ollama 성능", data)
 
-        # 6. 앞뒤 공백 제거
-        return answer.strip()
+    # 4. AI가 생성한 응답
+    answer = data["response"]
+
+    # 5. 추론 내용이 포함된 경우 제거
+    if "</think>" in answer:
+        answer = answer.split("</think>", 1)[1]
+
+    # 6. 앞뒤 공백 제거
+    return answer.strip()
 
 
-async def rerank_documents(question: str, documents: list[dict]) -> list[dict]:
+async def rerank_documents(
+        question: str,
+        documents: list[dict],
+        timings: dict[str, float] | None = None
+) -> list[dict]:
     if not documents:
         return []
 
@@ -115,6 +128,8 @@ async def rerank_documents(question: str, documents: list[dict]) -> list[dict]:
 {json.dumps(candidates, ensure_ascii=False)}
 """
 
+    rerank_started_at = time.perf_counter()
+
     async with httpx.AsyncClient(timeout=120.0) as client:
         response = await client.post(
             f"{OLLAMA_URL}/api/generate",
@@ -135,6 +150,9 @@ async def rerank_documents(question: str, documents: list[dict]) -> list[dict]:
         response.raise_for_status()
         result = response.json()
         print_ollama_metrics("리랭킹 Ollama 성능", result)
+
+    if timings is not None:
+        timings["rerank-time"] = time.perf_counter() - rerank_started_at
 
     raw_response = result.get("response", "")
 

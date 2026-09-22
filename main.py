@@ -15,6 +15,7 @@ CANDIDATE_LIMIT = 5
 # 거리 필터링 기준
 DISTANCE_THRESHOLD = 0.5
 DUPLICATE_DISTANCE_THRESHOLD = 0.1
+NO_ANSWER_MESSAGE = "제공된 문서에서 관련 정보를 찾을 수 없습니다."
 
 
 class EmbeddingRequest(BaseModel):
@@ -60,6 +61,7 @@ app = FastAPI(
 
 @app.middleware("http")
 async def measure_response_time(request: Request, call_next):
+    request.state.timings = {}
     start_time = time.perf_counter()
 
     # 요청에 해당하는 API 실행
@@ -70,6 +72,19 @@ async def measure_response_time(request: Request, call_next):
 
     # 응답 헤더에 실행 시간 추가
     response.headers["X-Process-Time"] = f"{elapsed_time:.3f}"
+
+    header_names = {
+        "embedding-time": "X-Embedding-Time",
+        "db-time": "X-DB-Time",
+        "rerank-time": "X-Rerank-Time",
+        "answer-time": "X-Answer-Time"
+    }
+
+    for name, value in request.state.timings.items():
+        header_name = header_names.get(name)
+
+        if header_name:
+            response.headers[header_name] = f"{value:.3f}"
 
     return response
 
@@ -122,6 +137,7 @@ def row_to_document(row: tuple) -> dict:
 async def retrieve_documents(
         question: str,
         strategy: str = "basic",
+        timings: dict[str, float] | None = None,
 ) -> list[dict]:
     """
     검색 전략에 따라 관련 문서를 조회합니다.
@@ -154,7 +170,8 @@ async def retrieve_documents(
             f"지원하지 않는 검색 전략입니다: {strategy}"
         )
 
-    query_embedding = await create_embedding(question)
+    query_embedding = await create_embedding(question, timings)
+
     embedding_value = str(query_embedding)
 
     # --------------------------------------------------
@@ -280,6 +297,8 @@ async def retrieve_documents(
             SEARCH_LIMIT,
         )
 
+    db_started_at = time.perf_counter()
+
     # --------------------------------------------------
     # PostgreSQL 검색 실행
     # --------------------------------------------------
@@ -290,6 +309,9 @@ async def retrieve_documents(
                 query_parameters,
             )
             rows = cursor.fetchall()
+
+    if timings is not None:
+        timings["db-time"] = time.perf_counter() - db_started_at
 
     # --------------------------------------------------
     # DB 결과를 API 응답 형식으로 변환
@@ -392,8 +414,9 @@ async def search_document_filtered(request: SearchRequest):
 
 
 @app.post("/test/chat/basic", tags=["테스트 API"])
-async def chat_basic_test(request: SearchRequest):
-    documents = await retrieve_documents(request.question, "basic")
+async def chat_basic_test(http_request: Request, request: SearchRequest):
+    timings = http_request.state.timings
+    documents = await retrieve_documents(request.question, "basic", timings)
 
     if not documents:
         return {
@@ -402,7 +425,11 @@ async def chat_basic_test(request: SearchRequest):
             "sources": []
         }
 
-    answer = await generate_answer(question=request.question, documents=documents)
+    answer = await generate_answer(
+        question=request.question,
+        documents=documents,
+        timings=timings
+    )
 
     return {
         "question": request.question,
@@ -413,8 +440,11 @@ async def chat_basic_test(request: SearchRequest):
 
 @app.post("/chat", tags=["운영 API"])
 @app.post("/test/chat/filtered", tags=["테스트 API"])
-async def chat_document_filtered(request: SearchRequest):
-    documents = await retrieve_documents(request.question, "filtered")
+async def chat_document_filtered(http_request: Request, request: SearchRequest):
+
+    timings = http_request.state.timings
+
+    documents = await retrieve_documents(request.question, "filtered", timings)
 
     if not documents:
         return {
@@ -423,23 +453,33 @@ async def chat_document_filtered(request: SearchRequest):
             "sources": []
         }
 
-    answer = await generate_answer(request.question, documents)
+    answer = await generate_answer(request.question, documents, timings)
+
+    response_sources = documents
+
+    if answer.strip().startswith(NO_ANSWER_MESSAGE):
+        response_sources = []
 
     # 6. AI 답변과 검색된 청크 반환
     return {
         "question": request.question,
         "answer": answer,
-        "sources": documents
+        "sources": response_sources
     }
 
 
 @app.post("/test/chat/reranked", tags=["테스트 API"])
-async def chat_document_reranked(request: SearchRequest):
-    documents = await retrieve_documents(request.question, "filtered")
+async def chat_document_reranked(
+        http_request: Request,
+        request: SearchRequest
+):
+    timings = http_request.state.timings
+    documents = await retrieve_documents(request.question, "filtered", timings)
 
     selected_documents = await rerank_documents(
         request.question,
-        documents
+        documents,
+        timings
     )
 
     if not selected_documents:
@@ -451,7 +491,8 @@ async def chat_document_reranked(request: SearchRequest):
 
     answer = await generate_answer(
         request.question,
-        selected_documents
+        selected_documents,
+        timings
     )
 
     return {
@@ -462,8 +503,12 @@ async def chat_document_reranked(request: SearchRequest):
 
 
 @app.post("/test/chat/deduplicated", tags=["테스트 API"])
-async def chat_document_deduplicated(request: SearchRequest):
-    documents = await retrieve_documents(request.question, "deduplicated")
+async def chat_document_deduplicated(
+        http_request: Request,
+        request: SearchRequest
+):
+    timings = http_request.state.timings
+    documents = await retrieve_documents(request.question, "deduplicated", timings)
 
     if not documents:
         return {
@@ -473,7 +518,7 @@ async def chat_document_deduplicated(request: SearchRequest):
         }
 
     # 6. 중복 제거된 청크로 답변 생성
-    answer = await generate_answer(request.question, documents)
+    answer = await generate_answer(request.question, documents, timings)
 
     return {
         "question": request.question,
@@ -483,8 +528,16 @@ async def chat_document_deduplicated(request: SearchRequest):
 
 
 @app.post("/test/chat/deduplicated-db", tags=["테스트 API"])
-async def chat_document_deduplicated_db(request: SearchRequest):
-    documents = await retrieve_documents(request.question, "deduplicated-db")
+async def chat_document_deduplicated_db(
+        http_request: Request,
+        request: SearchRequest
+):
+    timings = http_request.state.timings
+    documents = await retrieve_documents(
+        request.question,
+        "deduplicated-db",
+        timings
+    )
 
     if not documents:
         return {
@@ -493,7 +546,7 @@ async def chat_document_deduplicated_db(request: SearchRequest):
             "sources": []
         }
 
-    answer = await generate_answer(request.question, documents)
+    answer = await generate_answer(request.question, documents, timings)
 
     return {
         "question": request.question,
@@ -900,11 +953,14 @@ def get_document(source_document_id: int):
 
 @app.post("/test/chat/semantic-deduplicated", tags=["테스트 API"])
 async def chat_document_deduplicated_semantic(
+        http_request: Request,
         request: SearchRequest
 ):
+    timings = http_request.state.timings
     documents = await retrieve_documents(
         request.question,
-        "semantic-deduplicated"
+        "semantic-deduplicated",
+        timings
     )
 
     if not documents:
@@ -916,7 +972,8 @@ async def chat_document_deduplicated_semantic(
 
     answer = await generate_answer(
         request.question,
-        documents
+        documents,
+        timings
     )
 
     return {
@@ -928,16 +985,20 @@ async def chat_document_deduplicated_semantic(
 
 @app.post("/test/chat/semantic-reranked", tags=["테스트 API"])
 async def chat_document_deduplicated_semantic_reranked(
+        http_request: Request,
         request: SearchRequest
 ):
+    timings = http_request.state.timings
     documents = await retrieve_documents(
         request.question,
-        "semantic-deduplicated"
+        "semantic-deduplicated",
+        timings
     )
 
     selected_documents = await rerank_documents(
         request.question,
-        documents
+        documents,
+        timings
     )
 
     if not selected_documents:
@@ -949,7 +1010,8 @@ async def chat_document_deduplicated_semantic_reranked(
 
     answer = await generate_answer(
         request.question,
-        selected_documents
+        selected_documents,
+        timings
     )
 
     return {
