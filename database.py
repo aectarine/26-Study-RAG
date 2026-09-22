@@ -3,8 +3,9 @@ import os
 import psycopg
 from dotenv import load_dotenv
 
-# Git에 포함되는 개발 환경 설정을 우선 로드합니다.
-load_dotenv(".env.dev")
+# Uvicorn의 --env-file로 주입된 환경변수를 사용합니다.
+# 직접 실행할 때는 기본 .env 파일을 보조적으로 읽습니다.
+load_dotenv()
 
 def get_connection():
     return psycopg.connect(

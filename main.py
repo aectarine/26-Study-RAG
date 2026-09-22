@@ -544,7 +544,11 @@ async def chat_document_filtered(http_request: Request, request: SearchRequest):
     }
 
 
-@app.post("/test/chat/reranked", tags=["테스트 API"])
+@app.post(
+    "/test/chat/reranked",
+    response_model=ChatResponse,
+    tags=["테스트 API"]
+)
 async def chat_document_reranked(
         http_request: Request,
         request: SearchRequest
@@ -578,7 +582,11 @@ async def chat_document_reranked(
     }
 
 
-@app.post("/test/chat/deduplicated", tags=["테스트 API"])
+@app.post(
+    "/test/chat/deduplicated",
+    response_model=ChatResponse,
+    tags=["테스트 API"]
+)
 async def chat_document_deduplicated(
         http_request: Request,
         request: SearchRequest
@@ -603,7 +611,11 @@ async def chat_document_deduplicated(
     }
 
 
-@app.post("/test/chat/deduplicated-db", tags=["테스트 API"])
+@app.post(
+    "/test/chat/deduplicated-db",
+    response_model=ChatResponse,
+    tags=["테스트 API"]
+)
 async def chat_document_deduplicated_db(
         http_request: Request,
         request: SearchRequest
@@ -1027,7 +1039,11 @@ def get_document(source_document_id: int):
     }
 
 
-@app.post("/test/chat/semantic-deduplicated", tags=["테스트 API"])
+@app.post(
+    "/test/chat/semantic-deduplicated",
+    response_model=ChatResponse,
+    tags=["테스트 API"]
+)
 async def chat_document_deduplicated_semantic(
         http_request: Request,
         request: SearchRequest
@@ -1059,7 +1075,11 @@ async def chat_document_deduplicated_semantic(
     }
 
 
-@app.post("/test/chat/semantic-reranked", tags=["테스트 API"])
+@app.post(
+    "/test/chat/semantic-reranked",
+    response_model=ChatResponse,
+    tags=["테스트 API"]
+)
 async def chat_document_deduplicated_semantic_reranked(
         http_request: Request,
         request: SearchRequest

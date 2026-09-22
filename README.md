@@ -2,7 +2,7 @@
 
 FastAPI, PostgreSQL/pgvector, Ollama를 이용해 문서를 저장하고 문서 청크의 임베딩을 기반으로 검색·답변하는 학습용 RAG 서비스입니다.
 
-현재 프로젝트는 TXT 문서 업로드부터 임베딩 저장, 유사도 검색, 검색 결과별 답변 생성, 응답 시간 측정까지 구현되어 있습니다. 다음 단계는 검색 로직을 공통화하고 자동화 테스트로 품질을 검증하는 것입니다.
+현재 프로젝트는 TXT 문서 업로드부터 임베딩 저장, 유사도 검색, 검색 결과별 답변 생성, 응답 시간 측정, 운영·테스트 API 분리까지 구현되어 있습니다. 운영 API `/chat`은 거리 필터링 전략을 사용하며, 테스트 API는 검색 전략 비교용으로 유지합니다.
 
 ## 목차
 
@@ -51,8 +51,8 @@ RAG의 핵심 과정을 직접 구현하고 검색 방식에 따른 품질과 �
 | Ollama | Windows에 직접 설치 | 사용자 확인 |
 | Ollama 주소 | `http://localhost:11434` | `embedding.py`, `rag.py` |
 | 임베딩 모델 | `embeddinggemma` | `embedding.py`, Ollama 설치 상태 별도 확인 필요 |
-| 답변 생성 모델 | `study-rag-llm:latest` | 현재 `rag.py` 설정 |
-| 이전 답변 모델 | `qwen2.5:3b` | 비교용 이전 설정 |
+| 답변 생성 모델 | `qwen2.5:3b` | 현재 운영 설정 |
+| 추론 답변 모델 | `study-rag-llm:latest` | 별도 실험용 |
 | 리랭킹 모델 | `qwen3:4b` | `rag.py` |
 | Python | 3.14 이상 | `pyproject.toml` |
 
@@ -79,7 +79,7 @@ DB_PASSWORD
 | `qwen2.5:3b` | 현재 코드에서 사용하는 답변 생성 모델 | 설치 확인 |
 | `embeddinggemma` | 질문·문서 임베딩 생성 | 코드 설정 확인, 설치 상태 확인 필요 |
 
-`Modelfile`은 `qwen3:4b`를 기반으로 한국어 문서 기반 답변 시스템 프롬프트와 `temperature 0.3`을 설정합니다. 현재 `rag.py`는 `study-rag-llm:latest`를 답변 생성에 사용하며, API 요청에서 `think: false`를 설정하고 `<think>` 종료 태그 후의 답변만 반환하도록 처리합니다.
+`Modelfile`은 `qwen3:4b`를 기반으로 한국어 문서 기반 답변 시스템 프롬프트와 `temperature 0.3`을 설정합니다. 현재 운영 답변 생성은 `qwen2.5:3b`를 사용하며, `study-rag-llm:latest`는 추론 모델 비교용으로 보류되어 있습니다.
 
 ## 3. 전체 처리 흐름
 
@@ -119,7 +119,8 @@ Ollama 답변 생성
 | `test_main.http` | HTTP 요청 테스트 예시 |
 | `pyproject.toml` | Python 의존성과 프로젝트 설정 |
 | `uv.lock` | 의존성 잠금 파일 |
-| `.env` | DB 접속 환경변수 |
+| `.env.dev` | Git에 포함되는 개발 환경변수 |
+| `.env` | 로컬 전용 환경변수 |
 
 현재 DB 테이블 생성 SQL이나 Docker Compose 파일은 프로젝트 폴더에서 확인되지 않았습니다.
 
@@ -179,15 +180,20 @@ API 전체 처리 시간과 임베딩, DB 검색, 리랭킹, 답변 생성 단�
 
 | 메서드 | 경로 | 설명 |
 |---|---|---|
+| POST | `/chat` | 거리 필터링 후 답변 생성하는 운영 API |
 | POST | `/search` | 거리순 상위 3개 검색 |
 | POST | `/search/filtered` | 거리 `<= 0.5` 결과 검색 |
-| POST | `/chat` | 거리 필터링 후 답변 생성하는 운영 API |
+
+### 테스트 API
+
+| 메서드 | 경로 | 설명 |
+|---|---|---|
 | POST | `/test/chat/basic` | 기본 검색 실험 |
 | POST | `/test/chat/filtered` | 거리 필터링 실험 |
+| POST | `/test/chat/reranked` | 거리 필터링 후 리랭킹 실험 |
 | POST | `/test/chat/deduplicated` | Python 중복 제거 실험 |
 | POST | `/test/chat/deduplicated-db` | DB 중복 제거 실험 |
 | POST | `/test/chat/semantic-deduplicated` | 의미상 중복 제거 실험 |
-| POST | `/test/chat/reranked` | 거리 필터링 후 리랭킹 실험 |
 | POST | `/test/chat/semantic-reranked` | 의미상 중복 제거 후 리랭킹 실험 |
 
 초기 실험용 오타 엔드포인트 `/docuemnts`도 남아 있습니다. 신규 기능에서는 `/documents/upload`를 사용합니다.
@@ -297,8 +303,10 @@ study-rag-llm:latest
 ### FastAPI 실행
 
 ```powershell
-uv run uvicorn main:app --reload
+uv run uvicorn main:app --reload --env-file .env.dev
 ```
+
+`--env-file`은 Uvicorn이 지정한 파일의 환경변수를 서버 실행 전에 주입하는 옵션입니다. 애플리케이션 코드는 특정 파일명을 직접 지정하지 않고 `os.getenv()`로 주입된 값을 읽습니다.
 
 실제 포트는 로컬 환경에서 검증이 필요합니다.
 
@@ -427,12 +435,30 @@ http://127.0.0.1:8000/docs
 
 단계별 결과에서 일반 검색 방식은 임베딩과 답변 생성이 대부분의 시간을 차지하고 DB 검색은 약 0.05~0.07초로 작습니다. 리랭킹 방식은 리랭킹 모델 호출이 추가되어 전체 시간이 약 20초까지 증가하므로 운영 API에는 사용하지 않습니다. `Total` 헤더는 마지막 요청 기준이므로 평균 성능 판단은 `Average` 열을 우선 사용합니다.
 
+#### 최신 안정 실행 결과
+
+벤치마크 중복 실행 방지 기능을 추가한 뒤 품질 테스트와 벤치마크를 순서대로 한 번씩 실행했습니다. 품질 테스트 3개와 벤치마크 전체 요청이 모두 성공했습니다.
+
+| 항목 | 결과 |
+|---|---|
+| 품질 테스트 | 3개 모두 PASS |
+| 벤치마크 반복 횟수 | API별 5회 |
+| HTTP 상태 | 전체 200 |
+| 운영 API 평균 응답 시간 | 1.604초 |
+| 운영 API 답변 생성 시간 | 1.169초 |
+| 운영 API DB 검색 시간 | 0.054초 |
+| 운영 API 출처 | 14, 9, 15 |
+| 운영 API 중복 출처 | 0개 |
+
+최신 실행에서 `/test/chat/filtered`는 평균 1.502초, `/test/chat/deduplicated-db`는 평균 1.503초였습니다. 두 방식 모두 출처 3개를 반환했고 중복 출처는 없었습니다. `/test/chat/reranked`는 평균 18.156초, `/test/chat/semantic-reranked`는 평균 18.816초로 확인되어 테스트 전용으로 유지합니다.
+
 현재 결과만 기준으로 한 임시 판단:
 
-- 품질 우선 실험: `/chat/reranked` 또는 `/chat/deduplicated-semantic-reranked`
+- 품질 테스트 기준: `/chat`과 테스트 API 모두 정상 답변 확인
 - 응답 시간과 품질의 균형: `/chat`
-- 운영 기본 전략 후보: 새 모델의 추론 옵션과 생성 토큰 수를 조정한 뒤 `/chat` 재측정 필요
-- `/chat/filtered`, `/chat/deduplicated`, `/chat/deduplicated-db`: 검색 결과는 유지되지만 새 모델 기준 응답 시간이 길어 운영 기본값으로는 보류
+- 운영 기본 전략: `/chat`의 `filtered`
+- 빠른 중복 제거 실험: `/test/chat/deduplicated-db`
+- 리랭킹: 추가 지연이 크므로 테스트 전용 유지
 
 기존 모델 기준 측정에서 `/chat/reranked`와 `/chat/deduplicated-semantic-reranked`는 의미상 중복 청크 9를 제외했습니다. 두 방식 모두 추가 Ollama 호출로 느렸고, 의미 중복 제거를 적용한 방식이 더 높은 평균 지연 시간을 보였습니다. 문자열 기반 중복 제거 방식은 표현이 다른 청크를 동일 내용으로 판단하지 못했습니다.
 
@@ -440,10 +466,10 @@ http://127.0.0.1:8000/docs
 
 | 용도 | 추천 API | 이유 |
 |---|---|---|
-| 기본 서비스 | `/chat/filtered` | 기존 모델 기준 가장 빠르고 표준편차가 낮음 |
-| 고품질 답변 | `/chat/deduplicated-semantic-reranked` | 의미상 중복과 불필요한 청크를 줄임 |
-| 빠른 중복 제거 실험 | `/chat/deduplicated-db` | 빠르고 응답 시간이 안정적임 |
-| 비교·실험용 | `/chat`, `/chat/reranked`, `/chat/deduplicated` | 검색 전략 차이 분석용 |
+| 기본 서비스 | `/chat` | `filtered` 전략을 사용하는 운영 API |
+| 빠른 중복 제거 실험 | `/test/chat/deduplicated-db` | 빠르고 응답 시간이 안정적임 |
+| 리랭킹 실험 | `/test/chat/reranked` | 출처를 줄이지만 응답 시간이 큼 |
+| 비교·실험용 | `/test/chat/*` | 검색 전략 차이 분석용 |
 
 현재 한계:
 
@@ -471,13 +497,14 @@ http://127.0.0.1:8000/docs
 | 전체 응답 시간 측정 | 완료 | `X-Process-Time` |
 | 단계별 성능 측정 | 완료 | `X-Embedding-Time`, `X-DB-Time`, `X-Rerank-Time`, `X-Answer-Time` |
 | 검색 로직 공통화 | 완료 | `retrieve_documents()`로 검색 전략 통합 |
-| 의미상 중복 제거·리랭킹 | 완료 | `/chat/deduplicated-semantic-reranked` |
+| 의미상 중복 제거·리랭킹 | 완료 | `/test/chat/semantic-reranked` |
 | 추론 답변 모델 설치 | 완료 | `study-rag-llm:latest` 설치 확인 |
-| 추론 답변 모델 코드 전환 | 완료 | `rag.py`가 `study-rag-llm:latest` 사용 |
-| 테스트·운영 라우터 분리 | 미완료 | 다음 구조 개선 작업 |
-| 검색 품질 자동 평가 | 미완료 | 테스트 데이터 필요 |
-| 검색 벤치마크 | 완료 | `test_search_benchmark.py`, 기존 모델과 `study-rag-llm:latest` 기준 5회 반복 측정 |
-| 자동화 테스트 | 부분 완료 | `test_quality.py`의 핵심 질문·출처·거절 응답 검증 통과 |
+| 추론 답변 모델 코드 전환 | 보류 | 운영 모델은 `qwen2.5:3b`, 추론 모델은 실험용 |
+| 테스트·운영 라우터 분리 | 완료 | `/test/chat/*`와 `/chat` 구조 |
+| 검색 품질 자동 평가 | 완료 | `test_quality.py` 3개 케이스 통과 |
+| 검색 벤치마크 | 완료 | `test_search_benchmark.py`, API별 5회 반복 측정 |
+| 벤치마크 중복 실행 방지 | 완료 | 잠금 파일과 진행 상태 출력 적용 |
+| 자동화 테스트 | 진행 중 | 기본 품질 회귀 테스트 완료, 질문 유형 확장 필요 |
 
 ## 13. 남은 작업 목록
 
@@ -485,20 +512,20 @@ http://127.0.0.1:8000/docs
 |---|---|---:|---|---|
 | 1단계 | PostgreSQL/pgvector 컨테이너와 포트 확인 | 높음 | 진행 중 | Docker Desktop 사용 확인 |
 | 1단계 | 테이블 구조·벡터 차원·인덱스 확인 | 높음 | 미완료 | DB 접속 또는 마이그레이션 필요 |
-| 1단계 | FastAPI 실제 실행 명령과 포트 확인 | 높음 | 미완료 | 로컬 환경에서 검증 |
+| 1단계 | FastAPI 실제 실행 명령과 포트 확인 | 높음 | 완료 | `--env-file .env.dev`, 포트 8000 확인 |
 | 1단계 | 테스트·운영 라우터 분리 | 높음 | 완료 | `/test/chat/*`와 `/chat` 구조로 이동 |
-| 1단계 | `study-rag-llm:latest`를 답변 생성에 연결 | 높음 | 완료 | `rag.py` 연결 및 추론 출력 제거 검증 |
+| 1단계 | `study-rag-llm:latest`를 답변 생성에 연결 | 높음 | 보류 | 추론 모델은 별도 실험용으로 유지 |
 | 2단계 | 검색 SQL과 결과 변환 로직 공통화 | 높음 | 완료 | `retrieve_documents()`와 `row_to_document()` 구현 |
 | 2단계 | 검색 전략을 공통 함수 옵션으로 통합 | 높음 | 완료 | `basic`, `filtered`, `deduplicated`, `deduplicated-db` 지원 |
 | 2단계 | 운영용 기본 전략을 `/chat`에 연결 | 높음 | 완료 | `/chat`에 `filtered` 전략 연결 |
 | 2단계 | 관련성 낮은 결과의 답변 생성 중단 기준 검증 | 높음 | 부분 완료 | 거리 임계값 실험 필요 |
 | 3단계 | 질문 유형별 테스트와 기대 출처 작성 | 높음 | 완료 | `test_quality.py` 3개 기본 평가 케이스 통과 |
 | 3단계 | 검색 방식별 정확도·재현율·응답 시간 비교 자동화 | 높음 | 부분 완료 | 5회 반복 시간 비교 완료, 질문별 품질 평가 필요 |
-| 3단계 | `study-rag-llm:latest` 기준 전체 벤치마크 | 높음 | 부분 완료 | 추론 출력 문제와 높은 응답 시간 확인 |
+| 3단계 | `study-rag-llm:latest` 기준 전체 벤치마크 | 높음 | 완료 | 추론 출력 문제와 높은 응답 시간 확인 |
 | 3단계 | 새 모델 추론 시간 최적화 | 높음 | 보류 | `qwen3:4b` 기반 모델의 `think: false` 동작 문제 해결 필요 |
 | 3단계 | `qwen2.5:3b` 운영 모델 후보 확정 | 높음 | 완료 | 정상 답변과 평균 1~2초대 응답 확인 |
 | 3단계 | 의미상 중복 청크 제거 기준 검토 | 중간 | 부분 완료 | 거리 기준 `0.1` 실험, 추가 질문 검증 필요 |
-| 3단계 | 문서에 없는 질문의 거절 응답 테스트 | 높음 | 미완료 | 환각 여부 확인 |
+| 3단계 | 문서에 없는 질문의 거절 응답 테스트 | 높음 | 완료 | 출처 빈 목록과 거절 문구 검증 |
 | 4단계 | 단계별 성능 측정 추가 | 중간 | 완료 | 임베딩·DB·리랭킹·생성 시간 응답 헤더 제공 |
 | 4단계 | 동기 DB 호출 개선 검토 | 높음 | 미완료 | 동시 요청 대응 |
 | 4단계 | 자동화 테스트 추가 | 높음 | 진행 중 | 문서·검색·답변 회귀 테스트 확장 |
@@ -509,13 +536,13 @@ http://127.0.0.1:8000/docs
 
 ## 14. 다음 진행 순서
 
-1. Docker Desktop의 PostgreSQL/pgvector 컨테이너명과 포트 확인
-2. DB에 접속해 두 테이블의 실제 스키마·벡터 차원·인덱스 확인
-3. `/health`와 `/db-test`로 FastAPI와 DB 연결 검증
-4. 단계별 성능 결과를 파일로 저장해 장기 비교
-5. 운영 API의 응답 형식과 오류 처리 안정화
+1. Docker Desktop의 PostgreSQL/pgvector 컨테이너와 DB 스키마 확인
+2. `.env.dev`를 사용해 FastAPI 서버 실행
+3. `/health`와 `/db-test`로 서버·DB 연결 검증
+4. `test_quality.py`로 품질 회귀 테스트 실행
+5. `test_search_benchmark.py`로 API별 성능 비교
 6. 질문 유형과 기대 출처를 추가해 품질 테스트 확장
-7. `study-rag-llm:latest`는 별도 실험으로 추론 출력 문제 해결 후 재검증
+7. 운영 전 동기 DB 호출, 업로드 보안, 인증 검토
 
 검색 로직 공통화와 검색 전략 실험은 완료했습니다. 이제 테스트 API와 운영 API를 라우터 기준으로 분리하고, `/chat`에는 검증된 전략만 노출합니다.
 
@@ -524,10 +551,10 @@ http://127.0.0.1:8000/docs
 - Docker Desktop의 실제 컨테이너명, 포트, 이미지
 - PostgreSQL/pgvector 테이블 생성 SQL
 - `embedding` 벡터 차원과 인덱스 구성
-- FastAPI 실제 실행 포트
+- FastAPI 실제 실행 포트: 8000 기준 확인 완료
 - Ollama 모델 설치 상태
 - `study-rag-llm:latest`의 모델 호출별 추론 시간과 생성 토큰 수
-- 새 모델의 응답 시간을 줄인 뒤 운영 기본 전략으로 확정할지 여부
-- 자동화 테스트 프레임워크와 실행 방식
+- `study-rag-llm:latest`의 추론 시간 개선 후 재검증 여부
+- 자동화 테스트 질문과 기대 출처 확장
 - 단계별 성능 로그 저장 방식
 - 문서 교체 API의 DB 무결성 검증

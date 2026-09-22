@@ -5,7 +5,9 @@ import time
 import httpx
 from dotenv import load_dotenv
 
-load_dotenv(".env.dev")
+# Uvicorn의 --env-file로 주입된 환경변수를 사용합니다.
+# 직접 실행할 때는 기본 .env 파일을 보조적으로 읽습니다.
+load_dotenv()
 
 OLLAMA_URL = os.getenv(
     "OLLAMA_URL",

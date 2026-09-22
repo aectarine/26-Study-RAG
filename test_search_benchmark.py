@@ -1,4 +1,6 @@
+import os
 import time
+from pathlib import Path
 from statistics import mean, median, pstdev
 
 import httpx
@@ -7,6 +9,7 @@ import httpx
 BASE_URL = "http://127.0.0.1:8000"
 QUESTION = "ESS 배터리의 정기 점검 주기와 최대 충전량을 알려줘."
 RUN_COUNT = 5
+LOCK_FILE = Path(__file__).with_name(".search_benchmark.lock")
 
 ENDPOINTS = [
     "/chat",
@@ -17,6 +20,29 @@ ENDPOINTS = [
     "/test/chat/deduplicated-db",
     "/test/chat/semantic-reranked"
 ]
+
+
+def acquire_benchmark_lock() -> None:
+    try:
+        lock_handle = os.open(
+            LOCK_FILE,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY
+        )
+    except FileExistsError:
+        raise SystemExit(
+            "이미 벤치마크가 실행 중입니다. "
+            f"완료 후 {LOCK_FILE.name}이 자동으로 삭제됩니다."
+        )
+
+    with os.fdopen(lock_handle, "w", encoding="utf-8") as lock_file:
+        lock_file.write(str(os.getpid()))
+
+
+def release_benchmark_lock() -> None:
+    try:
+        LOCK_FILE.unlink()
+    except FileNotFoundError:
+        pass
 
 
 def count_duplicate_contents(sources: list[dict]) -> int:
@@ -100,6 +126,11 @@ def run_benchmark() -> list[dict]:
 
     with httpx.Client(timeout=180.0) as client:
         for endpoint in ENDPOINTS:
+            print(
+                f"벤치마크 진행 중: {endpoint}",
+                flush=True
+            )
+
             endpoint_results = [
                 send_request(client, endpoint, run_number)
                 for run_number in range(1, RUN_COUNT + 1)
@@ -144,6 +175,11 @@ def run_benchmark() -> list[dict]:
                 "source_ids": latest_result["source_ids"],
                 "answer": latest_result["answer"]
             })
+
+            print(
+                f"벤치마크 완료: {endpoint}",
+                flush=True
+            )
 
     return results
 
@@ -208,5 +244,10 @@ def print_results(results: list[dict]) -> None:
 
 
 if __name__ == "__main__":
-    benchmark_results = run_benchmark()
-    print_results(benchmark_results)
+    acquire_benchmark_lock()
+
+    try:
+        benchmark_results = run_benchmark()
+        print_results(benchmark_results)
+    finally:
+        release_benchmark_lock()
