@@ -32,7 +32,29 @@ class SearchRequest(BaseModel):
 app = FastAPI(
     title="Study-RAG",
     description="FastAPI + PostgreSQL + Ollama RAG 학습 프로젝트",
-    version="1.0.0"
+    version="1.0.0",
+    openapi_tags=[
+        {
+            "name": "운영 API",
+            "description": "검증된 검색 전략을 사용하는 실제 서비스 API"
+        },
+        {
+            "name": "테스트 API",
+            "description": "검색 전략 비교와 성능 측정을 위한 실험 API"
+        },
+        {
+            "name": "검색 API",
+            "description": "답변 생성 없이 문서 검색만 수행하는 API"
+        },
+        {
+            "name": "문서 관리",
+            "description": "문서 업로드, 조회, 수정, 삭제 API"
+        },
+        {
+            "name": "상태 확인",
+            "description": "서버와 DB 상태를 확인하는 API"
+        }
+    ]
 )
 
 
@@ -286,17 +308,17 @@ async def retrieve_documents(
     return documents
 
 
-@app.get("/")
+@app.get("/", tags=["상태 확인"])
 def root():
     return {"message": "Study-RAG Server Running"}
 
 
-@app.get("/health")
+@app.get("/health", tags=["상태 확인"])
 def health():
     return {"status": "ok"}
 
 
-@app.get("/db-test")
+@app.get("/db-test", tags=["상태 확인"])
 def db_test():
     with get_connection() as conn:
         with conn.cursor() as cursor:
@@ -309,7 +331,7 @@ def db_test():
     }
 
 
-@app.post("/embedding-test")
+@app.post("/embedding-test", tags=["상태 확인"])
 async def embedding_test(request: EmbeddingRequest):
     embedding = await create_embedding(request.text)
     return {
@@ -319,7 +341,7 @@ async def embedding_test(request: EmbeddingRequest):
     }
 
 
-@app.post("/docuemnts")
+@app.post("/docuemnts", tags=["문서 관리"])
 async def create_document(request: DocumentRequest):
     # 1. 문장을 임베딩 벡터로 변환
     embedding = await create_embedding(request.content)
@@ -351,7 +373,7 @@ async def create_document(request: DocumentRequest):
 
 # 여기까지 과정은 RAG의 검색(Retrieval) 구현 완료
 # 다음 과정은 검색된 문서를 Ollama의 qwen3:4b 모델에 전달하여 실제 AI 답변을 생성하도록 한다
-@app.post("/search")
+@app.post("/search", tags=["검색 API"])
 async def search_document(request: SearchRequest):
     documents = await retrieve_documents(request.question, "basic")
     return {
@@ -360,7 +382,7 @@ async def search_document(request: SearchRequest):
     }
 
 
-@app.post("/search/filtered")
+@app.post("/search/filtered", tags=["검색 API"])
 async def search_document_filtered(request: SearchRequest):
     documents = await retrieve_documents(request.question, "filtered")
     return {
@@ -369,8 +391,8 @@ async def search_document_filtered(request: SearchRequest):
     }
 
 
-@app.post("/chat")
-async def chat(request: SearchRequest):
+@app.post("/test/chat/basic", tags=["테스트 API"])
+async def chat_basic_test(request: SearchRequest):
     documents = await retrieve_documents(request.question, "basic")
 
     if not documents:
@@ -389,7 +411,8 @@ async def chat(request: SearchRequest):
     }
 
 
-@app.post("/chat/filtered")
+@app.post("/chat", tags=["운영 API"])
+@app.post("/test/chat/filtered", tags=["테스트 API"])
 async def chat_document_filtered(request: SearchRequest):
     documents = await retrieve_documents(request.question, "filtered")
 
@@ -410,7 +433,7 @@ async def chat_document_filtered(request: SearchRequest):
     }
 
 
-@app.post("/chat/reranked")
+@app.post("/test/chat/reranked", tags=["테스트 API"])
 async def chat_document_reranked(request: SearchRequest):
     documents = await retrieve_documents(request.question, "filtered")
 
@@ -438,7 +461,7 @@ async def chat_document_reranked(request: SearchRequest):
     }
 
 
-@app.post("/chat/deduplicated")
+@app.post("/test/chat/deduplicated", tags=["테스트 API"])
 async def chat_document_deduplicated(request: SearchRequest):
     documents = await retrieve_documents(request.question, "deduplicated")
 
@@ -459,7 +482,7 @@ async def chat_document_deduplicated(request: SearchRequest):
     }
 
 
-@app.post("/chat/deduplicated-db")
+@app.post("/test/chat/deduplicated-db", tags=["테스트 API"])
 async def chat_document_deduplicated_db(request: SearchRequest):
     documents = await retrieve_documents(request.question, "deduplicated-db")
 
@@ -479,7 +502,7 @@ async def chat_document_deduplicated_db(request: SearchRequest):
     }
 
 
-@app.post("/documents/upload")
+@app.post("/documents/upload", tags=["문서 관리"])
 async def upload_document(file: UploadFile = File(...)):
     # 1. TXT 파일 확인 및 내용 읽기
     if not file.filename or not file.filename.lower().endswith(".txt"):
@@ -604,7 +627,7 @@ async def upload_document(file: UploadFile = File(...)):
     }
 
 
-@app.put("/documents/{source_document_id}")
+@app.put("/documents/{source_document_id}", tags=["문서 관리"])
 async def replace_document(source_document_id: int, file: UploadFile = File(...)):
     # 1. TXT 파일 확인
     if not file.filename or not file.filename.lower().endswith(".txt"):
@@ -741,7 +764,7 @@ async def replace_document(source_document_id: int, file: UploadFile = File(...)
         }
 
 
-@app.delete("/documents/{source_document_id}")
+@app.delete("/documents/{source_document_id}", tags=["문서 관리"])
 def delete_document(source_document_id: int):
     with get_connection() as conn:
         with conn.cursor() as cursor:
@@ -794,7 +817,7 @@ def delete_document(source_document_id: int):
     }
 
 
-@app.get("/documents")
+@app.get("/documents", tags=["문서 관리"])
 def get_documents():
     with get_connection() as conn:
         with conn.cursor() as cursor:
@@ -825,7 +848,7 @@ def get_documents():
     }
 
 
-@app.get("/documents/{source_document_id}")
+@app.get("/documents/{source_document_id}", tags=["문서 관리"])
 def get_document(source_document_id: int):
     with get_connection() as conn:
         with conn.cursor() as cursor:
@@ -875,7 +898,7 @@ def get_document(source_document_id: int):
     }
 
 
-@app.post("/chat/deduplicated-semantic")
+@app.post("/test/chat/semantic-deduplicated", tags=["테스트 API"])
 async def chat_document_deduplicated_semantic(
         request: SearchRequest
 ):
@@ -903,7 +926,7 @@ async def chat_document_deduplicated_semantic(
     }
 
 
-@app.post("/chat/deduplicated-semantic-reranked")
+@app.post("/test/chat/semantic-reranked", tags=["테스트 API"])
 async def chat_document_deduplicated_semantic_reranked(
         request: SearchRequest
 ):

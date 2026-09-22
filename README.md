@@ -51,8 +51,8 @@ RAG의 핵심 과정을 직접 구현하고 검색 방식에 따른 품질과 �
 | Ollama | Windows에 직접 설치 | 사용자 확인 |
 | Ollama 주소 | `http://localhost:11434` | `embedding.py`, `rag.py` |
 | 임베딩 모델 | `embeddinggemma` | `embedding.py`, Ollama 설치 상태 별도 확인 필요 |
-| 답변 생성 모델 | `qwen2.5:3b` | 현재 `rag.py` 설정 |
-| 추론 답변 모델 | `study-rag-llm:latest` | Ollama 설치 확인, 코드 전환 필요 |
+| 답변 생성 모델 | `study-rag-llm:latest` | 현재 `rag.py` 설정 |
+| 이전 답변 모델 | `qwen2.5:3b` | 비교용 이전 설정 |
 | 리랭킹 모델 | `qwen3:4b` | `rag.py` |
 | Python | 3.14 이상 | `pyproject.toml` |
 
@@ -79,7 +79,7 @@ DB_PASSWORD
 | `qwen2.5:3b` | 현재 코드에서 사용하는 답변 생성 모델 | 설치 확인 |
 | `embeddinggemma` | 질문·문서 임베딩 생성 | 코드 설정 확인, 설치 상태 확인 필요 |
 
-`Modelfile`은 `qwen3:4b`를 기반으로 한국어 문서 기반 답변 시스템 프롬프트와 `temperature 0.3`을 설정합니다. `study-rag-llm:latest`를 실제 답변 생성에 사용하려면 `rag.py`의 `LLM_MODEL`을 변경하고, 추론 응답에 대한 출력 처리를 함께 검증해야 합니다.
+`Modelfile`은 `qwen3:4b`를 기반으로 한국어 문서 기반 답변 시스템 프롬프트와 `temperature 0.3`을 설정합니다. 현재 `rag.py`는 `study-rag-llm:latest`를 답변 생성에 사용하며, API 요청에서 `think: false`를 설정하고 `<think>` 종료 태그 후의 답변만 반환하도록 처리합니다.
 
 ## 3. 전체 처리 흐름
 
@@ -174,33 +174,36 @@ X-Process-Time: 0.123
 | PUT | `/documents/{source_document_id}` | 문서 교체 및 재임베딩 |
 | DELETE | `/documents/{source_document_id}` | 문서와 연결 청크 삭제 |
 
-### 현재 검색·챗 API
+### 검색·챗 API
 
 | 메서드 | 경로 | 설명 |
 |---|---|---|
 | POST | `/search` | 거리순 상위 3개 검색 |
 | POST | `/search/filtered` | 거리 `<= 0.5` 결과 검색 |
-| POST | `/chat` | 기본 검색 후 답변 생성 |
-| POST | `/chat/filtered` | 거리 필터링 후 답변 생성 |
-| POST | `/chat/reranked` | 거리 필터링 후 리랭킹 및 답변 생성 |
-| POST | `/chat/deduplicated` | 상위 결과를 Python에서 중복 제거 후 답변 생성 |
-| POST | `/chat/deduplicated-db` | DB에서 중복 제거 후 거리순 결과로 답변 생성 |
-| POST | `/chat/deduplicated-semantic-reranked` | 의미상 중복 제거 후 리랭킹 및 답변 생성 |
+| POST | `/chat` | 거리 필터링 후 답변 생성하는 운영 API |
+| POST | `/test/chat/basic` | 기본 검색 실험 |
+| POST | `/test/chat/filtered` | 거리 필터링 실험 |
+| POST | `/test/chat/deduplicated` | Python 중복 제거 실험 |
+| POST | `/test/chat/deduplicated-db` | DB 중복 제거 실험 |
+| POST | `/test/chat/semantic-deduplicated` | 의미상 중복 제거 실험 |
+| POST | `/test/chat/reranked` | 거리 필터링 후 리랭킹 실험 |
+| POST | `/test/chat/semantic-reranked` | 의미상 중복 제거 후 리랭킹 실험 |
 
 초기 실험용 오타 엔드포인트 `/docuemnts`도 남아 있습니다. 신규 기능에서는 `/documents/upload`를 사용합니다.
 
 ### 목표 라우터 구조
 
-현재까지는 실험용 검색 API와 운영 후보 API가 `main.py`에 함께 있습니다. 앞으로는 다음처럼 분리합니다.
+Swagger 문서에서는 태그 순서를 `운영 API → 테스트 API → 검색 API → 문서 관리 → 상태 확인`으로 고정해 운영 API와 실험 API가 섞이지 않도록 구성했습니다.
 
 | 구분 | 목표 경로 | 용도 |
 |---|---|---|
 | 운영 API | `/chat` | 최종 검증된 검색 전략만 제공 |
 | 실험 API | `/test/chat/basic` | 기본 검색 비교 |
 | 실험 API | `/test/chat/filtered` | 거리 필터링 비교 |
-| 실험 API | `/test/chat/reranked` | 리랭킹 비교 |
 | 실험 API | `/test/chat/deduplicated` | Python 중복 제거 비교 |
 | 실험 API | `/test/chat/deduplicated-db` | DB 중복 제거 비교 |
+| 실험 API | `/test/chat/semantic-deduplicated` | 의미상 중복 제거 비교 |
+| 실험 API | `/test/chat/reranked` | 거리 필터링 후 리랭킹 비교 |
 | 실험 API | `/test/chat/semantic-reranked` | 의미상 중복 제거·리랭킹 비교 |
 
 운영 API `/chat`의 검색 전략은 내부 서비스 함수에서 관리하고, 외부 경로는 안정적으로 유지합니다. 실험 API는 검색 방식 비교와 벤치마크를 위해 유지합니다.
@@ -311,7 +314,7 @@ http://127.0.0.1:8000/docs
 3. `POST /documents/upload`로 TXT 업로드
 4. 문서 목록과 상세 조회로 저장 확인
 5. `POST /search`로 기본 검색 확인
-6. 다섯 가지 `/chat` 엔드포인트에 같은 질문 전송
+6. 운영 API `/chat`과 일곱 가지 `/test/chat/*` 엔드포인트에 같은 질문 전송
 7. `answer`, `sources`, `distance`, `filename` 비교
 8. 응답의 `X-Process-Time` 값 기록
 
@@ -348,6 +351,10 @@ http://127.0.0.1:8000/docs
 
 질문은 `ESS 배터리의 정기 점검 주기와 최대 충전량을 알려줘.`를 사용했습니다. 각 API를 5회씩 실행했으며, 모든 API가 200 응답을 반환했습니다.
 
+#### 기존 모델 기준선
+
+기존 `qwen2.5:3b` 답변 생성 모델을 사용한 기준선입니다.
+
 | API | 평균 | 중앙값 | 표준편차 | 최소 | 최대 | source 수 | 중복 수 | 결과 청크 |
 |---|---:|---:|---:|---:|---:|---:|---:|---|
 | `/chat` | 1.964초 | 1.536초 | 0.840초 | 1.522초 | 3.642초 | 3 | 0 | 14, 9, 15 |
@@ -357,13 +364,50 @@ http://127.0.0.1:8000/docs
 | `/chat/deduplicated-db` | 1.531초 | 1.528초 | 0.021초 | 1.509초 | 1.565초 | 3 | 0 | 14, 9, 15 |
 | `/chat/deduplicated-semantic-reranked` | 20.959초 | 19.885초 | 2.997초 | 18.192초 | 26.727초 | 2 | 0 | 14, 15 |
 
-이번 측정에서 `/chat/reranked`와 `/chat/deduplicated-semantic-reranked`는 의미상 중복 청크 9를 제외했습니다. 두 방식 모두 추가 Ollama 호출로 느렸고, 의미 중복 제거를 적용한 방식이 더 높은 평균 지연 시간을 보였습니다. 문자열 기반 중복 제거 방식은 표현이 다른 청크를 동일 내용으로 판단하지 못했습니다.
+#### `study-rag-llm:latest` 기준 결과
 
-현재 추천 전략:
+2026-09-22에 `study-rag-llm:latest`를 답변 생성 모델로 사용해 다시 측정했습니다. 모든 API가 200 응답을 반환했고, 모든 답변이 질문의 핵심 내용인 점검 주기 30일과 최대 충전량 85% 이하를 정확히 포함했습니다.
+
+| API | 평균 | 중앙값 | 표준편차 | 최소 | 최대 | source 수 | 중복 수 | 결과 청크 |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| `/chat` | 26.759초 | 25.895초 | 1.968초 | 24.534초 | 29.717초 | 3 | 0 | 14, 9, 15 |
+| `/chat/filtered` | 30.449초 | 29.209초 | 12.180초 | 19.194초 | 53.142초 | 3 | 0 | 14, 9, 15 |
+| `/chat/reranked` | 21.876초 | 24.035초 | 10.226초 | 2.666초 | 33.399초 | 2 | 0 | 14, 15 |
+| `/chat/deduplicated` | 34.902초 | 33.544초 | 9.369초 | 21.079초 | 47.958초 | 3 | 0 | 14, 9, 15 |
+| `/chat/deduplicated-db` | 28.345초 | 27.603초 | 3.837초 | 22.658초 | 34.100초 | 3 | 0 | 14, 9, 15 |
+| `/chat/deduplicated-semantic-reranked` | 35.220초 | 23.906초 | 22.274초 | 22.477초 | 79.620초 | 2 | 0 | 14, 15 |
+
+이번 결과의 핵심은 답변 품질은 유지됐지만, 추론 기능이 포함된 새 모델로 교체하면서 전체 응답 시간이 크게 증가했다는 점입니다. `/chat` 기준 평균은 기존 1.964초에서 26.759초로 증가했습니다. 또한 리랭킹이 포함된 방식은 의미상 중복 청크 9를 제외했지만 추가 모델 호출과 추론 시간 때문에 응답 시간 편차가 커졌습니다. 특히 `/chat/deduplicated-semantic-reranked`는 최대 79.620초까지 증가했으므로 운영 API 후보로 바로 선택하면 안 됩니다.
+
+#### `qwen2.5:3b` 최적화 후 결과
+
+`study-rag-llm:latest`에서 추론 출력 문제가 확인되어 답변 생성 모델을 `qwen2.5:3b`로 변경한 뒤 2026-09-22에 다시 측정했습니다. 모든 API가 200 응답을 반환했고, 영어 추론 내용 없이 정상적인 한국어 답변을 생성했습니다.
+
+| API | 평균 | 중앙값 | 표준편차 | 최소 | 최대 | source 수 | 중복 수 | 결과 청크 |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| `/chat` | 1.571초 | 1.522초 | 0.106초 | 1.508초 | 1.782초 | 3 | 0 | 14, 9, 15 |
+| `/chat/filtered` | 1.507초 | 1.511초 | 0.011초 | 1.494초 | 1.518초 | 3 | 0 | 14, 9, 15 |
+| `/chat/reranked` | 20.851초 | 21.355초 | 1.311초 | 18.496초 | 22.016초 | 2 | 0 | 14, 15 |
+| `/chat/deduplicated` | 2.017초 | 1.558초 | 0.937초 | 1.527초 | 3.890초 | 3 | 0 | 14, 9, 15 |
+| `/chat/deduplicated-db` | 1.576초 | 1.573초 | 0.016초 | 1.558초 | 1.605초 | 3 | 0 | 14, 9, 15 |
+| `/chat/deduplicated-semantic-reranked` | 23.737초 | 23.513초 | 0.937초 | 22.496초 | 24.851초 | 2 | 0 | 14, 15 |
+
+이 결과에서는 `/chat/filtered`가 가장 빠르고 안정적이며, `/chat/deduplicated-db`도 평균 1.576초와 표준편차 0.016초로 안정적입니다. 리랭킹 방식은 의미상 중복을 제거하지만 추가 Ollama 호출 때문에 20초 이상 걸립니다. 현재 운영 모델은 `qwen2.5:3b`로 유지하고, `study-rag-llm:latest`는 추론 출력 문제를 해결한 뒤 다시 비교합니다.
+
+현재 결과만 기준으로 한 임시 판단:
+
+- 품질 우선 실험: `/chat/reranked` 또는 `/chat/deduplicated-semantic-reranked`
+- 응답 시간과 품질의 균형: `/chat`
+- 운영 기본 전략 후보: 새 모델의 추론 옵션과 생성 토큰 수를 조정한 뒤 `/chat` 재측정 필요
+- `/chat/filtered`, `/chat/deduplicated`, `/chat/deduplicated-db`: 검색 결과는 유지되지만 새 모델 기준 응답 시간이 길어 운영 기본값으로는 보류
+
+기존 모델 기준 측정에서 `/chat/reranked`와 `/chat/deduplicated-semantic-reranked`는 의미상 중복 청크 9를 제외했습니다. 두 방식 모두 추가 Ollama 호출로 느렸고, 의미 중복 제거를 적용한 방식이 더 높은 평균 지연 시간을 보였습니다. 문자열 기반 중복 제거 방식은 표현이 다른 청크를 동일 내용으로 판단하지 못했습니다.
+
+기존 모델 기준 추천 전략:
 
 | 용도 | 추천 API | 이유 |
 |---|---|---|
-| 기본 서비스 | `/chat/filtered` | 가장 빠르고 표준편차가 낮음 |
+| 기본 서비스 | `/chat/filtered` | 기존 모델 기준 가장 빠르고 표준편차가 낮음 |
 | 고품질 답변 | `/chat/deduplicated-semantic-reranked` | 의미상 중복과 불필요한 청크를 줄임 |
 | 빠른 중복 제거 실험 | `/chat/deduplicated-db` | 빠르고 응답 시간이 안정적임 |
 | 비교·실험용 | `/chat`, `/chat/reranked`, `/chat/deduplicated` | 검색 전략 차이 분석용 |
@@ -395,10 +439,10 @@ http://127.0.0.1:8000/docs
 | 검색 로직 공통화 | 완료 | `retrieve_documents()`로 검색 전략 통합 |
 | 의미상 중복 제거·리랭킹 | 완료 | `/chat/deduplicated-semantic-reranked` |
 | 추론 답변 모델 설치 | 완료 | `study-rag-llm:latest` 설치 확인 |
-| 추론 답변 모델 코드 전환 | 미완료 | 현재 `rag.py`는 `qwen2.5:3b` 사용 |
+| 추론 답변 모델 코드 전환 | 완료 | `rag.py`가 `study-rag-llm:latest` 사용 |
 | 테스트·운영 라우터 분리 | 미완료 | 다음 구조 개선 작업 |
 | 검색 품질 자동 평가 | 미완료 | 테스트 데이터 필요 |
-| 검색 벤치마크 | 완료 | `test_search_benchmark.py`, 5회 반복 측정 |
+| 검색 벤치마크 | 완료 | `test_search_benchmark.py`, 기존 모델과 `study-rag-llm:latest` 기준 5회 반복 측정 |
 | 자동화 테스트 | 미완료 | 기능별 회귀 테스트는 추가 필요 |
 
 ## 13. 남은 작업 목록
@@ -408,14 +452,17 @@ http://127.0.0.1:8000/docs
 | 1단계 | PostgreSQL/pgvector 컨테이너와 포트 확인 | 높음 | 진행 중 | Docker Desktop 사용 확인 |
 | 1단계 | 테이블 구조·벡터 차원·인덱스 확인 | 높음 | 미완료 | DB 접속 또는 마이그레이션 필요 |
 | 1단계 | FastAPI 실제 실행 명령과 포트 확인 | 높음 | 미완료 | 로컬 환경에서 검증 |
-| 1단계 | 테스트·운영 라우터 분리 | 높음 | 미완료 | `/test/chat/*`와 `/chat` 구조로 이동 |
-| 1단계 | `study-rag-llm:latest`를 답변 생성에 연결 | 높음 | 미완료 | `rag.py` 모델 설정과 추론 출력 검증 |
+| 1단계 | 테스트·운영 라우터 분리 | 높음 | 완료 | `/test/chat/*`와 `/chat` 구조로 이동 |
+| 1단계 | `study-rag-llm:latest`를 답변 생성에 연결 | 높음 | 완료 | `rag.py` 연결 및 추론 출력 제거 검증 |
 | 2단계 | 검색 SQL과 결과 변환 로직 공통화 | 높음 | 완료 | `retrieve_documents()`와 `row_to_document()` 구현 |
 | 2단계 | 검색 전략을 공통 함수 옵션으로 통합 | 높음 | 완료 | `basic`, `filtered`, `deduplicated`, `deduplicated-db` 지원 |
-| 2단계 | 운영용 기본 전략을 `/chat`에 연결 | 높음 | 미완료 | `/chat/filtered` 또는 의미상 중복·리랭킹 선택 |
+| 2단계 | 운영용 기본 전략을 `/chat`에 연결 | 높음 | 완료 | `/chat`에 `filtered` 전략 연결 |
 | 2단계 | 관련성 낮은 결과의 답변 생성 중단 기준 검증 | 높음 | 부분 완료 | 거리 임계값 실험 필요 |
 | 3단계 | 질문 유형별 테스트와 기대 출처 작성 | 높음 | 미완료 | 평가 데이터셋 구축 |
-| 3단계 | 검색 방식별 정확도·재현율·응답 시간 비교 자동화 | 높음 | 부분 완료 | 5회 응답 시간 벤치마크 완료, 품질 평가 자동화 필요 |
+| 3단계 | 검색 방식별 정확도·재현율·응답 시간 비교 자동화 | 높음 | 부분 완료 | 5회 반복 시간 비교 완료, 질문별 품질 평가 필요 |
+| 3단계 | `study-rag-llm:latest` 기준 전체 벤치마크 | 높음 | 부분 완료 | 추론 출력 문제와 높은 응답 시간 확인 |
+| 3단계 | 새 모델 추론 시간 최적화 | 높음 | 보류 | `qwen3:4b` 기반 모델의 `think: false` 동작 문제 해결 필요 |
+| 3단계 | `qwen2.5:3b` 운영 모델 후보 확정 | 높음 | 완료 | 정상 답변과 평균 1~2초대 응답 확인 |
 | 3단계 | 의미상 중복 청크 제거 기준 검토 | 중간 | 부분 완료 | 거리 기준 `0.1` 실험, 추가 질문 검증 필요 |
 | 3단계 | 문서에 없는 질문의 거절 응답 테스트 | 높음 | 미완료 | 환각 여부 확인 |
 | 4단계 | 단계별 성능 측정 추가 | 중간 | 미완료 | 임베딩·DB·리랭킹·생성 분리 측정 |
@@ -431,15 +478,11 @@ http://127.0.0.1:8000/docs
 1. Docker Desktop의 PostgreSQL/pgvector 컨테이너명과 포트 확인
 2. DB에 접속해 두 테이블의 실제 스키마·벡터 차원·인덱스 확인
 3. `/health`와 `/db-test`로 FastAPI와 DB 연결 검증
-4. `study-rag-llm:latest`를 답변 생성 모델로 연결
-5. 추론 응답에 `<think>` 또는 모델별 출력 형식이 섞이지 않는지 검증
-6. 현재 검색 엔드포인트를 `/test/chat/*` 라우터로 분리
-7. 벤치마크가 `/test/chat/*` 실험 API를 호출하도록 경로 정리
-8. 검증된 기본 전략을 운영용 `/chat`에 연결
-9. 질문 유형별 기대 출처와 자동화 테스트 작성
-10. 문서에 없는 질문의 거절 응답 검증
-11. `X-Process-Time`과 단계별 시간을 이용해 성능 비교
-12. 운영 API의 응답 형식과 오류 처리 안정화
+4. 질문 유형별 기대 출처와 자동화 테스트 작성
+5. 문서에 없는 질문의 거절 응답 검증
+6. `X-Process-Time`을 임베딩·DB·리랭킹·생성 단계별 시간으로 확장
+7. 운영 API의 응답 형식과 오류 처리 안정화
+8. `study-rag-llm:latest`는 별도 실험으로 추론 출력 문제 해결 후 재검증
 
 검색 로직 공통화와 검색 전략 실험은 완료했습니다. 이제 테스트 API와 운영 API를 라우터 기준으로 분리하고, `/chat`에는 검증된 전략만 노출합니다.
 
@@ -450,8 +493,8 @@ http://127.0.0.1:8000/docs
 - `embedding` 벡터 차원과 인덱스 구성
 - FastAPI 실제 실행 포트
 - Ollama 모델 설치 상태
-- `study-rag-llm:latest`의 실제 생성 응답과 추론 출력 형식
-- `rag.py`의 답변 생성 모델 전환 여부
+- `study-rag-llm:latest`의 모델 호출별 추론 시간과 생성 토큰 수
+- 새 모델의 응답 시간을 줄인 뒤 운영 기본 전략으로 확정할지 여부
 - 자동화 테스트 프레임워크와 실행 방식
 - 단계별 성능 로그 저장 방식
 - 문서 교체 API의 DB 무결성 검증

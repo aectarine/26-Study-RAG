@@ -10,11 +10,12 @@ RUN_COUNT = 5
 
 ENDPOINTS = [
     "/chat",
-    "/chat/filtered",
-    "/chat/reranked",
-    "/chat/deduplicated",
-    "/chat/deduplicated-db",
-    "/chat/deduplicated-semantic-reranked"
+    "/test/chat/basic",
+    "/test/chat/filtered",
+    "/test/chat/reranked",
+    "/test/chat/deduplicated",
+    "/test/chat/deduplicated-db",
+    "/test/chat/semantic-reranked"
 ]
 
 

@@ -4,6 +4,19 @@ import httpx
 
 OLLAMA_URL = "http://localhost:11434"
 LLM_MODEL = "qwen2.5:3b"
+# LLM_MODEL = "study-rag-llm:latest"
+
+
+def print_ollama_metrics(prefix: str, data: dict) -> None:
+    metrics = {
+        "total_duration": data.get("total_duration"),
+        "load_duration": data.get("load_duration"),
+        "prompt_eval_duration": data.get("prompt_eval_duration"),
+        "eval_duration": data.get("eval_duration"),
+        "eval_count": data.get("eval_count")
+    }
+
+    print(f"{prefix}: {metrics}")
 
 
 async def generate_answer(question: str, documents: list[dict]) -> str:
@@ -16,22 +29,16 @@ async def generate_answer(question: str, documents: list[dict]) -> str:
         f"[문서 {doc['id']}]\n{doc['content']}"
         for doc in documents
     )
-    print(f"context: \n{context}")
 
     # 2. LLM에 전달할 프롬프트 생성
     prompt = f"""
-당신은 ESS 배터리 관련 문서 기반 질의응답 AI입니다.
-
-아래 제공된 문서만 참고하여 사용자의 질문에 답변하세요.
+문서 기반 질의응답 시스템입니다.
 
 규칙:
-1. 제공된 문서에 근거하여 답변하세요.
-2. 문서에 없는 내용은 임의로 만들어내지 마세요.
-3. 문서에서 답을 찾을 수 없다면
-   "제공된 문서에서 관련 정보를 찾을 수 없습니다."라고 답변하세요.
-4. 한국어로만 답변하세요.
-5. 추론 과정이나 분석 내용은 출력하지 마세요.
-6. 최종 답변만 간결하게 출력하세요.
+- 아래 문서에 있는 내용만 사용하세요.
+- 문서에 답이 없으면 "제공된 문서에서 관련 정보를 찾을 수 없습니다."라고 답하세요.
+- 한국어로만 답변하세요.
+- 추론 과정 없이 최종 답변만 간결하게 작성하세요.
 
 [참고 문서]
 {context}
@@ -50,11 +57,18 @@ async def generate_answer(question: str, documents: list[dict]) -> str:
                 "model": LLM_MODEL,
                 "prompt": prompt,
                 "stream": False,
-                "think": False
+                "think": False,
+                "options": {
+                    "temperature": 0.1,
+                    "top_p": 0.8,
+                    "num_predict": 128
+                },
+                "keep_alive": "10m"
             }
         )
         response.raise_for_status()
         data = response.json()
+        print_ollama_metrics("답변 생성 Ollama 성능", data)
 
         # 4. AI가 생성한 응답
         answer = data["response"]
@@ -103,18 +117,24 @@ async def rerank_documents(question: str, documents: list[dict]) -> list[dict]:
 
     async with httpx.AsyncClient(timeout=120.0) as client:
         response = await client.post(
-            "http://localhost:11434/api/generate",
+            f"{OLLAMA_URL}/api/generate",
             json={
                 "model": "qwen3:4b",
                 "prompt": prompt,
                 "stream": False,
                 "format": "json",
-                "think": False
+                "think": False,
+                "options": {
+                    "temperature": 0,
+                    "num_predict": 64
+                },
+                "keep_alive": "10m"
             }
         )
 
         response.raise_for_status()
         result = response.json()
+        print_ollama_metrics("리랭킹 Ollama 성능", result)
 
     raw_response = result.get("response", "")
 
