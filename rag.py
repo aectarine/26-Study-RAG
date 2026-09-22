@@ -93,7 +93,7 @@ async def generate_answer(question: str, documents: list[dict], timings: dict[st
                 "stream": False,
                 "think": False,
                 "options": {
-                    "temperature": 0.1,
+                    "temperature": 0,
                     "top_p": 0.8,
                     "num_predict": 128
                 },

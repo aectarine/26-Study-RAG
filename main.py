@@ -1,5 +1,6 @@
 import hashlib
 import logging
+import re
 import time
 
 import httpx
@@ -120,6 +121,7 @@ async def ollama_connection_error(request: Request, e: httpx.ConnectError):
         }
     )
 
+
 @app.exception_handler(httpx.TimeoutException)
 async def ollama_timeout_error(request: Request, e: httpx.TimeoutException):
     logger.error("Ollama 요청 시간 초과: %s", e)
@@ -130,6 +132,7 @@ async def ollama_timeout_error(request: Request, e: httpx.TimeoutException):
             "message": "Ollama 답변 생성 시간이 초과되었습니다."
         }
     )
+
 
 @app.exception_handler(psycopg.Error)
 async def database_error(request: Request, e: psycopg.Error):
@@ -142,6 +145,7 @@ async def database_error(request: Request, e: psycopg.Error):
         }
     )
 
+
 @app.exception_handler(Exception)
 async def unexpected_error(request: Request, e: Exception):
     logger.exception("처리되지 않은 서버 오류")
@@ -153,16 +157,118 @@ async def unexpected_error(request: Request, e: Exception):
         }
     )
 
-def split_text(content: str) -> list[str]:
-    # Windows 줄바꿈(\r\n)을 \n으로 통일
-    content = content.replace("\r\n", "\n").replace("\r", "\n")
 
-    # 빈 줄을 기준으로 문단 분할
-    return [
+def split_text(content: str, max_chars: int = 700, overlap: int = 100) -> list[str]:
+    if overlap >= max_chars:
+        raise ValueError("overlap은 max_chars보다 작아야 합니다.")
+
+    content = content.replace("\r\n", "\n").replace("\r", "\n").strip()
+
+    if not content:
+        return []
+
+    paragraphs = [
         paragraph.strip()
         for paragraph in content.split("\n\n")
         if paragraph.strip()
     ]
+
+    heading_pattern = re.compile(r"^(?:#{1,6}\s+|\d+[.)]\s+).+")
+    merged_paragraphs = paragraphs
+    paragraphs = []
+    index = 0
+
+    while index < len(merged_paragraphs):
+        paragraph = merged_paragraphs[index]
+        is_heading = bool(heading_pattern.match(paragraph))
+
+        if (
+                is_heading
+                and len(paragraph) <= 120
+                and index + 1 < len(merged_paragraphs)
+        ):
+            paragraphs.append(
+                f"{paragraph}\n{merged_paragraphs[index + 1]}"
+            )
+            index += 2
+            continue
+
+        paragraphs.append(paragraph)
+        index += 1
+
+    chunks = []
+
+    for paragraph in paragraphs:
+        if len(paragraph) <= max_chars:
+            chunks.append(paragraph)
+            continue
+
+        start = 0
+        paragraph_length = len(paragraph)
+
+        while start < paragraph_length:
+            target_end = min(
+                start + max_chars,
+                paragraph_length
+            )
+
+            end = target_end
+
+            if target_end < paragraph_length:
+                minimum_boundary = start + max_chars // 2
+                paragraph_part = paragraph[start:target_end]
+                sentence_matches = list(
+                    re.finditer(
+                        r"[.!?](?=\s|$)",
+                        paragraph_part
+                    )
+                )
+
+                if sentence_matches:
+                    sentence_end = start + sentence_matches[-1].end()
+
+                    if sentence_end >= minimum_boundary:
+                        end = sentence_end
+                else:
+                    space_boundary = paragraph.rfind(
+                        " ",
+                        minimum_boundary,
+                        target_end
+                    )
+
+                    if space_boundary > start:
+                        end = space_boundary
+
+            chunk = paragraph[start:end].strip()
+
+            if chunk:
+                chunks.append(chunk)
+
+            if end >= paragraph_length:
+                break
+
+            next_start = max(
+                end - overlap,
+                start + 1
+            )
+
+            while (
+                    next_start < paragraph_length
+                    and paragraph[next_start] != " "
+            ):
+                next_start += 1
+
+            next_start = min(
+                next_start + 1,
+                paragraph_length
+            )
+
+            if next_start <= start:
+                next_start = end
+
+            start = next_start
+
+    return chunks
 
 
 def create_content_hash(content: str) -> str:
@@ -183,6 +289,39 @@ def remove_duplicate_documents(documents: list[dict]) -> list[dict]:
 
         seen_contents.add(content)
         unique_documents.append(document)
+
+    return unique_documents
+
+
+def remove_contained_documents(documents: list[dict]) -> list[dict]:
+    """더 가까운 문서의 내용을 포함하는 긴 중복 청크를 제거합니다."""
+    normalized_contents = [
+        " ".join(document["content"].split())
+        for document in documents
+    ]
+    unique_documents = []
+
+    for index, document in enumerate(documents):
+        current_content = normalized_contents[index]
+        is_redundant = False
+
+        for other_index, other_content in enumerate(normalized_contents):
+            if index == other_index:
+                continue
+
+            if len(current_content) <= len(other_content):
+                continue
+
+            if normalized_contents[other_index] in current_content:
+                if (
+                        documents[other_index]["distance"]
+                        <= document["distance"]
+                ):
+                    is_redundant = True
+                    break
+
+        if not is_redundant:
+            unique_documents.append(document)
 
     return unique_documents
 
@@ -391,6 +530,9 @@ async def retrieve_documents(
     if strategy == "deduplicated":
         documents = remove_duplicate_documents(documents)
 
+    if strategy == "semantic-deduplicated":
+        documents = remove_contained_documents(documents)
+
     return documents
 
 
@@ -427,7 +569,7 @@ async def embedding_test(request: EmbeddingRequest):
     }
 
 
-@app.post("/docuemnts", tags=["문서 관리"])
+@app.post("/documents", tags=["문서 관리"])
 async def create_document(request: DocumentRequest):
     # 1. 문장을 임베딩 벡터로 변환
     embedding = await create_embedding(request.content)
@@ -507,20 +649,14 @@ async def chat_basic_test(http_request: Request, request: SearchRequest):
     }
 
 
-@app.post(
-    "/chat",
-    response_model=ChatResponse,
-    tags=["운영 API"]
-)
-@app.post(
-    "/test/chat/filtered",
-    response_model=ChatResponse,
-    tags=["테스트 API"]
-)
-async def chat_document_filtered(http_request: Request, request: SearchRequest):
+async def create_chat_response(
+        http_request: Request,
+        request: SearchRequest,
+        strategy: str
+):
     timings = http_request.state.timings
 
-    documents = await retrieve_documents(request.question, "filtered", timings)
+    documents = await retrieve_documents(request.question, strategy, timings)
 
     if not documents:
         return {
@@ -542,6 +678,32 @@ async def chat_document_filtered(http_request: Request, request: SearchRequest):
         "answer": answer,
         "sources": response_sources
     }
+
+
+@app.post(
+    "/chat",
+    response_model=ChatResponse,
+    tags=["운영 API"]
+)
+async def chat_document(http_request: Request, request: SearchRequest):
+    return await create_chat_response(
+        http_request,
+        request,
+        "semantic-deduplicated"
+    )
+
+
+@app.post(
+    "/test/chat/filtered",
+    response_model=ChatResponse,
+    tags=["테스트 API"]
+)
+async def chat_document_filtered(http_request: Request, request: SearchRequest):
+    return await create_chat_response(
+        http_request,
+        request,
+        "filtered"
+    )
 
 
 @app.post(
@@ -769,7 +931,11 @@ async def upload_document(file: UploadFile = File(...)):
 
 
 @app.put("/documents/{source_document_id}", tags=["문서 관리"])
-async def replace_document(source_document_id: int, file: UploadFile = File(...)):
+async def replace_document(
+        source_document_id: int,
+        force: bool = False,
+        file: UploadFile = File(...)
+):
     # 1. TXT 파일 확인
     if not file.filename or not file.filename.lower().endswith(".txt"):
         raise HTTPException(
@@ -818,11 +984,14 @@ async def replace_document(source_document_id: int, file: UploadFile = File(...)
     new_hash = create_content_hash(content)
     old_hash = existing_document[1]
 
-    if old_hash == new_hash:
+    if old_hash == new_hash and not force:
         return {
             "source_document_id": source_document_id,
             "status": "skipped",
-            "message": "기존 문서와 내용일 동일합니다."
+            "message": (
+                "기존 문서와 내용이 동일합니다. "
+                "청크 정책을 다시 적용하려면 force=true를 사용하세요."
+            )
         }
 
     # 5. 새 문서 분할 및 임베딩 생성
@@ -842,7 +1011,7 @@ async def replace_document(source_document_id: int, file: UploadFile = File(...)
                 """
                 SELECT id
                 FROM rag_documents
-                WHERE id = %s
+                WHERE source_document_id = %s
                     FOR UPDATE
                 """,
                 (source_document_id,)

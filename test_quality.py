@@ -11,21 +11,37 @@ TEST_CASES = [
     {
         "name": "점검 주기와 충전량",
         "question": "ESS 배터리의 정기 점검 주기와 최대 충전량을 알려줘.",
-        "expected_source_ids": {14, 15},
+        "expected_source_terms": [
+            "정기 점검 주기는 30일",
+            "최대 충전량은 85%"
+        ],
         "required_answer_terms": ["30일", "85%"],
         "forbidden_answer_terms": []
     },
     {
         "name": "저온 충전 제한",
         "question": "ESS 배터리 온도가 0도 미만이면 어떻게 해야 하나요?",
-        "expected_source_ids": {13},
+        "expected_source_terms": [
+            "0도 미만이면 충전을 제한"
+        ],
         "required_answer_terms": ["충전", "제한"],
         "forbidden_answer_terms": []
     },
     {
+        "name": "충전 주의사항 중복 제거",
+        "question": "ESS 충전 관련 주의사항",
+        "expected_source_terms": [
+            "0도 미만이면 충전을 제한",
+            "최대 충전량은 85%"
+        ],
+        "required_answer_terms": ["충전", "85%"],
+        "forbidden_answer_terms": [],
+        "expected_source_count": 2
+    },
+    {
         "name": "문서에 없는 질문",
         "question": "ESS 배터리의 제조사 보증 기간은 얼마인가요?",
-        "expected_source_ids": set(),
+        "expected_source_terms": [],
         "required_answer_terms": ["찾을 수 없습니다"],
         "forbidden_answer_terms": ["년", "개월"]
     }
@@ -64,12 +80,28 @@ def validate_response(test_case: dict, response_body: dict) -> list[str]:
     if forbidden_terms:
         errors.append(f"금지 답변 내용 포함: {forbidden_terms}")
 
-    missing_source_ids = test_case["expected_source_ids"] - source_ids
+    source_contents = [
+        normalize_text(source.get("content", ""))
+        for source in sources
+    ]
 
-    if missing_source_ids:
-        errors.append(f"기대 출처 누락: {sorted(missing_source_ids)}")
+    missing_source_terms = [
+        term
+        for term in test_case["expected_source_terms"]
+        if not any(term in content for content in source_contents)
+    ]
 
-    if not test_case["expected_source_ids"] and sources:
+    if missing_source_terms:
+        errors.append(f"기대 출처 내용 누락: {missing_source_terms}")
+
+    expected_source_count = test_case.get("expected_source_count")
+
+    if expected_source_count is not None and len(sources) != expected_source_count:
+        errors.append(
+            f"출처 개수 불일치: 기대 {expected_source_count}, 실제 {len(sources)}"
+        )
+
+    if not test_case["expected_source_terms"] and sources:
         errors.append(f"문서에 없는 질문인데 출처 반환: {sorted(source_ids)}")
 
     return errors

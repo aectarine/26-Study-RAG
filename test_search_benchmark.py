@@ -18,6 +18,7 @@ ENDPOINTS = [
     "/test/chat/reranked",
     "/test/chat/deduplicated",
     "/test/chat/deduplicated-db",
+    "/test/chat/semantic-deduplicated",
     "/test/chat/semantic-reranked"
 ]
 
