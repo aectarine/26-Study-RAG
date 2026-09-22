@@ -3,8 +3,8 @@ import os
 import psycopg
 from dotenv import load_dotenv
 
-# .env 파일의 환경변수 로드
-load_dotenv()
+# Git에 포함되는 개발 환경 설정을 우선 로드합니다.
+load_dotenv(".env.dev")
 
 def get_connection():
     return psycopg.connect(

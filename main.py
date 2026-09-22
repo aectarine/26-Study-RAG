@@ -1,8 +1,12 @@
 import hashlib
+import logging
 import time
 
+import httpx
+import psycopg
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.requests import Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from database import get_connection
@@ -28,6 +32,20 @@ class DocumentRequest(BaseModel):
 
 class SearchRequest(BaseModel):
     question: str
+
+
+class SourceDocument(BaseModel):
+    id: int
+    content: str
+    distance: float
+    source_document_id: int | None
+    filename: str | None
+
+
+class ChatResponse(BaseModel):
+    question: str
+    answer: str
+    sources: list[SourceDocument]
 
 
 app = FastAPI(
@@ -57,6 +75,8 @@ app = FastAPI(
         }
     ]
 )
+
+logger = logging.getLogger(__name__)
 
 
 @app.middleware("http")
@@ -88,6 +108,50 @@ async def measure_response_time(request: Request, call_next):
 
     return response
 
+
+@app.exception_handler(httpx.ConnectError)
+async def ollama_connection_error(request: Request, e: httpx.ConnectError):
+    logger.error("Ollama 연결 실패: %s", e)
+    return JSONResponse(
+        status_code=503,
+        content={
+            "error": "ollama_unavailable",
+            "message": "Ollama 서버에 연결할 수 없습니다."
+        }
+    )
+
+@app.exception_handler(httpx.TimeoutException)
+async def ollama_timeout_error(request: Request, e: httpx.TimeoutException):
+    logger.error("Ollama 요청 시간 초과: %s", e)
+    return JSONResponse(
+        status_code=504,
+        content={
+            "error": "ollama_timeout",
+            "message": "Ollama 답변 생성 시간이 초과되었습니다."
+        }
+    )
+
+@app.exception_handler(psycopg.Error)
+async def database_error(request: Request, e: psycopg.Error):
+    logger.error("데이터베이스 오류: %s", e)
+    return JSONResponse(
+        status_code=503,
+        content={
+            "error": "database_unavailable",
+            "message": "데이터베이스에 연결할 수 없습니다."
+        }
+    )
+
+@app.exception_handler(Exception)
+async def unexpected_error(request: Request, e: Exception):
+    logger.exception("처리되지 않은 서버 오류")
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": "internal_server_error",
+            "message": "서버 내부 오류가 발생했습니다."
+        }
+    )
 
 def split_text(content: str) -> list[str]:
     # Windows 줄바꿈(\r\n)을 \n으로 통일
@@ -413,7 +477,7 @@ async def search_document_filtered(request: SearchRequest):
     }
 
 
-@app.post("/test/chat/basic", tags=["테스트 API"])
+@app.post("/test/chat/basic", response_model=ChatResponse, tags=["테스트 API"])
 async def chat_basic_test(http_request: Request, request: SearchRequest):
     timings = http_request.state.timings
     documents = await retrieve_documents(request.question, "basic", timings)
@@ -421,7 +485,7 @@ async def chat_basic_test(http_request: Request, request: SearchRequest):
     if not documents:
         return {
             "question": request.question,
-            "answer": "등록된 문서가 없습니다.",
+            "answer": NO_ANSWER_MESSAGE,
             "sources": []
         }
 
@@ -431,17 +495,29 @@ async def chat_basic_test(http_request: Request, request: SearchRequest):
         timings=timings
     )
 
+    response_sources = documents
+
+    if answer.strip().startswith(NO_ANSWER_MESSAGE):
+        response_sources = []
+
     return {
         "question": request.question,
         "answer": answer,
-        "sources": documents
+        "sources": response_sources
     }
 
 
-@app.post("/chat", tags=["운영 API"])
-@app.post("/test/chat/filtered", tags=["테스트 API"])
+@app.post(
+    "/chat",
+    response_model=ChatResponse,
+    tags=["운영 API"]
+)
+@app.post(
+    "/test/chat/filtered",
+    response_model=ChatResponse,
+    tags=["테스트 API"]
+)
 async def chat_document_filtered(http_request: Request, request: SearchRequest):
-
     timings = http_request.state.timings
 
     documents = await retrieve_documents(request.question, "filtered", timings)

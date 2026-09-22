@@ -1,13 +1,40 @@
 import json
+import os
 import time
 
 import httpx
+from dotenv import load_dotenv
 
-OLLAMA_URL = "http://localhost:11434"
-LLM_MODEL = "qwen2.5:3b"
+load_dotenv(".env.dev")
 
+OLLAMA_URL = os.getenv(
+    "OLLAMA_URL",
+    "http://localhost:11434"
+)
 
-# LLM_MODEL = "study-rag-llm:latest"
+LLM_MODEL = os.getenv(
+    "LLM_MODEL",
+    "qwen2.5:3b"
+)
+
+RERANK_MODEL = os.getenv(
+    "RERANK_MODEL",
+    "qwen3:4b"
+)
+
+ANSWER_TIMEOUT = float(
+    os.getenv(
+        "OLLAMA_ANSWER_TIMEOUT",
+        "180"
+    )
+)
+
+RERANK_TIMEOUT = float(
+    os.getenv(
+        "OLLAMA_RERANK_TIMEOUT",
+        "120"
+    )
+)
 
 
 def print_ollama_metrics(prefix: str, data: dict) -> None:
@@ -55,7 +82,7 @@ async def generate_answer(question: str, documents: list[dict], timings: dict[st
     answer_started_at = time.perf_counter()
 
     # 3. OLLAMA LLM 호출
-    async with httpx.AsyncClient(timeout=180.0) as client:
+    async with httpx.AsyncClient(timeout=ANSWER_TIMEOUT) as client:
         response = await client.post(
             f"{OLLAMA_URL}/api/generate",
             json={
@@ -130,11 +157,11 @@ async def rerank_documents(
 
     rerank_started_at = time.perf_counter()
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
+    async with httpx.AsyncClient(timeout=RERANK_TIMEOUT) as client:
         response = await client.post(
             f"{OLLAMA_URL}/api/generate",
             json={
-                "model": "qwen3:4b",
+                "model": RERANK_MODEL,
                 "prompt": prompt,
                 "stream": False,
                 "format": "json",
