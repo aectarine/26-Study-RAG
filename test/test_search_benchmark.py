@@ -12,14 +12,14 @@ RUN_COUNT = 5
 LOCK_FILE = Path(__file__).with_name(".search_benchmark.lock")
 
 ENDPOINTS = [
-    "/chat",
-    "/test/chat/basic",
-    "/test/chat/filtered",
-    "/test/chat/reranked",
-    "/test/chat/deduplicated",
-    "/test/chat/deduplicated-db",
-    "/test/chat/semantic-deduplicated",
-    "/test/chat/semantic-reranked"
+    "/api/chat",
+    "/api/test/chat/basic",
+    "/api/test/chat/filtered",
+    "/api/test/chat/reranked",
+    "/api/test/chat/deduplicated",
+    "/api/test/chat/deduplicated-db",
+    "/api/test/chat/semantic-deduplicated",
+    "/api/test/chat/semantic-reranked"
 ]
 
 
@@ -123,7 +123,7 @@ def send_request(client: httpx.Client, endpoint: str, run_number: int) -> dict:
 
 
 def run_benchmark() -> list[dict]:
-    results = []
+    rs = []
 
     with httpx.Client(timeout=180.0) as client:
         for endpoint in ENDPOINTS:
@@ -132,18 +132,18 @@ def run_benchmark() -> list[dict]:
                 flush=True
             )
 
-            endpoint_results = [
+            endpoint_rs = [
                 send_request(client, endpoint, run_number)
                 for run_number in range(1, RUN_COUNT + 1)
             ]
 
             elapsed_times = [
-                result["elapsed_time"]
-                for result in endpoint_results
-                if result["elapsed_time"] is not None
+                item_rs["elapsed_time"]
+                for item_rs in endpoint_rs
+                if item_rs["elapsed_time"] is not None
             ]
 
-            latest_result = endpoint_results[-1]
+            latest_rs = endpoint_rs[-1]
 
             if elapsed_times:
                 average_time = mean(elapsed_times)
@@ -158,23 +158,23 @@ def run_benchmark() -> list[dict]:
                 minimum_time = None
                 maximum_time = None
 
-            results.append({
+            rs.append({
                 "endpoint": endpoint,
-                "status_code": latest_result["status_code"],
+                "status_code": latest_rs["status_code"],
                 "average_time": average_time,
                 "median_time": median_time,
                 "standard_deviation": standard_deviation,
                 "minimum_time": minimum_time,
                 "maximum_time": maximum_time,
-                "process_time": latest_result["process_time"],
-                "embedding_time": latest_result["embedding_time"],
-                "db_time": latest_result["db_time"],
-                "rerank_time": latest_result["rerank_time"],
-                "answer_time": latest_result["answer_time"],
-                "source_count": latest_result["source_count"],
-                "duplicate_count": latest_result["duplicate_count"],
-                "source_ids": latest_result["source_ids"],
-                "answer": latest_result["answer"]
+                "process_time": latest_rs["process_time"],
+                "embedding_time": latest_rs["embedding_time"],
+                "db_time": latest_rs["db_time"],
+                "rerank_time": latest_rs["rerank_time"],
+                "answer_time": latest_rs["answer_time"],
+                "source_count": latest_rs["source_count"],
+                "duplicate_count": latest_rs["duplicate_count"],
+                "source_ids": latest_rs["source_ids"],
+                "answer": latest_rs["answer"]
             })
 
             print(
@@ -182,7 +182,7 @@ def run_benchmark() -> list[dict]:
                 flush=True
             )
 
-    return results
+    return rs
 
 
 def format_time(value: float | None) -> str:
@@ -192,7 +192,7 @@ def format_time(value: float | None) -> str:
     return f"{value:.3f}s"
 
 
-def print_results(results: list[dict]) -> None:
+def print_rs(rs: list[dict]) -> None:
     print(f"질문: {QUESTION}")
     print(f"반복 횟수: {RUN_COUNT}")
     print()
@@ -216,31 +216,31 @@ def print_results(results: list[dict]) -> None:
     )
     print("=" * 175)
 
-    for result in results:
+    for item_rs in rs:
         print(
-            f"{result['endpoint']:<33}"
-            f"{str(result['status_code']):>8}"
-            f"{format_time(result['average_time']):>12}"
-            f"{format_time(result['median_time']):>12}"
-            f"{format_time(result['standard_deviation']):>12}"
-            f"{format_time(result['minimum_time']):>12}"
-            f"{format_time(result['maximum_time']):>12}"
-            f"{(result['process_time'] or '-'):>10}"
-            f"{(result['embedding_time'] or '-'):>10}"
-            f"{(result['db_time'] or '-'):>10}"
-            f"{(result['rerank_time'] or '-'):>10}"
-            f"{(result['answer_time'] or '-'):>10}"
-            f"{result['source_count']:>10}"
-            f"{result['duplicate_count']:>12}"
-            f"  {result['source_ids']}"
+            f"{item_rs['endpoint']:<33}"
+            f"{str(item_rs['status_code']):>8}"
+            f"{format_time(item_rs['average_time']):>12}"
+            f"{format_time(item_rs['median_time']):>12}"
+            f"{format_time(item_rs['standard_deviation']):>12}"
+            f"{format_time(item_rs['minimum_time']):>12}"
+            f"{format_time(item_rs['maximum_time']):>12}"
+            f"{(item_rs['process_time'] or '-'):>10}"
+            f"{(item_rs['embedding_time'] or '-'):>10}"
+            f"{(item_rs['db_time'] or '-'):>10}"
+            f"{(item_rs['rerank_time'] or '-'):>10}"
+            f"{(item_rs['answer_time'] or '-'):>10}"
+            f"{item_rs['source_count']:>10}"
+            f"{item_rs['duplicate_count']:>12}"
+            f"  {item_rs['source_ids']}"
         )
 
     print("=" * 175)
     print()
 
-    for result in results:
-        print(f"[{result['endpoint']}]")
-        print(result["answer"])
+    for item_rs in rs:
+        print(f"[{item_rs['endpoint']}]")
+        print(item_rs["answer"])
         print()
 
 
@@ -248,7 +248,7 @@ if __name__ == "__main__":
     acquire_benchmark_lock()
 
     try:
-        benchmark_results = run_benchmark()
-        print_results(benchmark_results)
+        benchmark_rs = run_benchmark()
+        print_rs(benchmark_rs)
     finally:
         release_benchmark_lock()

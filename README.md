@@ -1,8 +1,8 @@
 # Study-RAG
 
-FastAPI, PostgreSQL/pgvector, Ollama를 이용해 문서를 저장하고 문서 청크의 임베딩을 기반으로 검색·답변하는 학습용 RAG 서비스입니다.
+FastAPI, PostgreSQL/pgvector, Ollama를 이용해 문서를 저장하고 문서 청크의 임베딩을 기반으로 검색·답변하는 학습용 RAG 서비스입니다. 애플리케이션 코드는 `Controller(router) → Service → Repository` 계층으로 분리하고, SQLAlchemy 세션과 서비스 트랜잭션을 사용합니다.
 
-현재 프로젝트는 TXT 문서 업로드부터 임베딩 저장, 유사도 검색, 검색 결과별 답변 생성, 응답 시간 측정, 운영·테스트 API 분리까지 구현되어 있습니다. 운영 API `/chat`은 DB 벡터 거리 기반 의미 중복 제거 전략을 사용하며, 테스트 API는 검색 전략 비교용으로 유지합니다.
+현재 프로젝트는 TXT 문서 업로드부터 임베딩 저장, 유사도 검색, 검색 결과별 답변 생성, 응답 시간 측정, 운영·테스트 API 분리까지 구현되어 있습니다. 외부 API는 모두 `/api` 아래에 있으며, 운영 API `/api/chat`은 DB 벡터 거리 기반 의미 중복 제거 전략을 사용합니다.
 
 ## 목차
 
@@ -35,25 +35,27 @@ RAG의 핵심 과정을 직접 구현하고 검색 방식에 따른 품질과 �
 
 | 구분 | 기술 |
 |---|---|
-| API 서버 | FastAPI |
+| API 서버 | FastAPI + fastapi-utils CBV |
 | 데이터베이스 | PostgreSQL |
+| DB 접근 계층 | SQLAlchemy 2.x AsyncSession + asyncpg |
 | 벡터 검색 | pgvector, 코사인 거리 연산자 `<=>` |
 | 임베딩·답변 생성 | Ollama |
 | 패키지 관리 | uv |
+| 의존성 주입 | dependency-injector |
 | 실행 환경 | Windows + Docker Desktop |
 
 ## 2. 현재 실행 환경
 
 | 구성 요소 | 현재 상태 | 확인 근거 |
 |---|---|---|
-| FastAPI | Windows에서 실행 | `main.py` |
+| FastAPI | Windows에서 실행 | `main.py`, `router/` |
 | PostgreSQL/pgvector | Docker Desktop에서 실행 | 사용자 확인 |
 | Ollama | Windows에 직접 설치 | 사용자 확인 |
-| Ollama 주소 | `http://localhost:11434` | `embedding.py`, `rag.py` |
-| 임베딩 모델 | `embeddinggemma` | `embedding.py`, Ollama 설치 상태 별도 확인 필요 |
-| 답변 생성 모델 | `qwen2.5:3b` | 현재 운영 설정 |
+| Ollama 주소 | `http://localhost:11434` | `core/cfg/settings.py` |
+| 임베딩 모델 | `embeddinggemma` | `core/embed/embedding.py`, Ollama 설치 상태 별도 확인 필요 |
+| 답변 생성 모델 | `qwen2.5:3b` | `.env.dev` → 중앙 설정 객체 |
 | 추론 답변 모델 | `study-rag-llm:latest` | 별도 실험용 |
-| 리랭킹 모델 | `qwen3:4b` | `rag.py` |
+| 리랭킹 모델 | `qwen3:4b` | `core/llm/ollama.py` |
 | Python | 3.14 이상 | `pyproject.toml` |
 
 DB 접속 정보는 다음 환경변수를 사용합니다.
@@ -107,28 +109,105 @@ Ollama 답변 생성
 
 | 파일 | 역할 |
 |---|---|
-| `main.py` | FastAPI 앱, 문서 관리 API, 검색·챗 API, 응답 시간 미들웨어 |
-| `database.py` | `.env` 로드 및 PostgreSQL 연결 |
-| `embedding.py` | Ollama 임베딩 API 호출 |
-| `rag.py` | Ollama 답변 생성 및 리랭킹 |
-| `test_search_benchmark.py` | 검색 API 5회 반복 벤치마크 |
-| `test_quality.py` | 운영 API 답변 내용과 기대 출처 검증 |
-| `routers/` | 목표 구조: 운영·실험 API 라우터 분리 |
-| `services/` | 목표 구조: 검색·답변·문서 처리 로직 분리 |
+| `main.py` | FastAPI 앱 생성, 미들웨어·예외 처리·라우터 등록 |
+| `core/cfg/settings.py` | 환경변수 기반 싱글톤 설정 객체 |
+| `core/db/database.py` | SQLAlchemy 비동기 엔진·세션 팩토리와 DB 수명주기 |
+| `core/dep/container.py` | Singleton·Factory 정의, 요청별 세션과 객체 조립·정리 통합 관리 |
+| `core/util/route.py` | CBV 그룹 루트를 기존 슬래시 없는 API 경로로 등록 |
+| `core/model/entity.py` | SQLAlchemy ORM 모델과 pgvector 타입 정의 |
+| `core/schema/request.py` | Pydantic 요청 스키마(`EmbeddingRequest`, `DocumentRequest`, `SearchRequest`) |
+| `core/schema/response.py` | Pydantic 응답 스키마(`ChatResponse`, `SourceDocumentResponse`) |
+| `core/handler/exception.py` | 공통 예외 응답 등록 |
+| `core/middleware/timing.py` | 처리 시간 헤더와 요청 로그 미들웨어 |
+| `core/util/document.py` | TXT 검증·해시·청크 분할 유틸리티 |
+| `core/util/retrieval.py` | DI 컨테이너를 사용하는 검색 호출 유틸리티 |
+| `repo/document_repo.py` | 문서·청크 CRUD와 벡터 검색 Repository |
+| `service/document_service.py` | 문서 생성·업로드·조회·교체·삭제 업무와 트랜잭션 경계 |
+| `service/chunk_service.py` | 상위 서비스 트랜잭션에 참여하는 청크 저장·삭제 |
+| `service/rag_service.py` | 임베딩 검색·필터·중복 제거 업무 |
+| `service/chat_service.py` | 검색 결과 기반 답변 생성 업무 |
+| `router/status_router.py` | 상태 확인·임베딩 테스트 Controller |
+| `router/search_router.py` | 검색 Controller |
+| `router/chat_router.py` | 운영·테스트 채팅 Controller |
+| `router/document_router.py` | 문서 관리 Controller |
+| `core/embed/embedding.py` | Ollama 임베딩 API 호출(`create_embedding`) |
+| `core/llm/ollama.py` | Ollama 답변 생성 및 리랭킹 |
+| `test/test_search_benchmark.py` | 검색 API 5회 반복 벤치마크 |
+| `test/test_quality.py` | 운영 API 답변 내용과 기대 출처 검증, 6개 질문 유형 |
+| `test/test_document_api.py` | 문서 업로드·조회·교체·삭제 회귀 테스트 |
+| `test/test_error_api.py` | 잘못된 요청과 존재하지 않는 문서의 오류 응답 검증 |
+| `test/test_fault_api.py` | 모킹 기반 DB·Ollama 장애 응답 검증 |
+| `test/test_architecture.py` | 격리된 DB에서 요청 DI·공동 롤백·취소·자원 정리 검증 |
+| `test/test_unit.py` | 청크 누락 방지·업로드 읽기 제한·DB URL·리랭킹 경계값 검증 |
+| `test/test_concurrency.py` | `/chat` 동시 요청과 응답 헤더 검증 |
+| `router/` | 운영·실험 API Controller 분리 |
+| `service/` | 검색·답변·문서 업무 로직과 트랜잭션 처리 |
+| `repo/` | SQLAlchemy Repository와 영속성 처리 |
+| `core/` | 설정·DB·DI 공통 기반 |
 | `Modelfile` | Ollama 모델 설정 예시 |
-| `test_main.http` | HTTP 요청 테스트 예시 |
+| `test/test_main.http` | HTTP 요청 테스트 예시 |
 | `pyproject.toml` | Python 의존성과 프로젝트 설정 |
 | `uv.lock` | 의존성 잠금 파일 |
 | `.env.dev` | Git에 포함되는 개발 환경변수 |
 | `.env` | 로컬 전용 환경변수 |
 
-현재 DB 테이블 생성 SQL이나 Docker Compose 파일은 프로젝트 폴더에서 확인되지 않았습니다.
+각 애플리케이션 폴더는 Python namespace package로 사용하므로 재수출만 하는 `__init__.py`를 두지 않습니다. 생성 규칙과 요청별 조립은 `core/dep/container.py` 하나에서 관리합니다. 상단의 Container는 Singleton·Factory를 정의하고 하단의 의존성 함수는 요청별 세션 생성·정리와 객체 재사용을 담당합니다. 라우터는 `@cbv` 클래스 속성에서 서비스를 한 번 선언하여 각 메서드에서 `self.service`로 사용합니다.
+
+최종 계층 의존 방향은 다음과 같습니다.
+
+```text
+main.py
+  └─ router/*_router.py       API 경로·요청 검증·응답 변환
+       └─ service/*_service.py 업무 규칙·트랜잭션 경계
+            └─ repo/*_repo.py  SQLAlchemy 조회·저장·삭제
+                 └─ core/model/entity.py
+
+core/dep/container.py          Singleton·Factory 정의와 요청별 객체 조립·세션 종료
+core/embed/                    Ollama 임베딩 클라이언트
+core/llm/                      Ollama 답변·리랭킹 클라이언트
+core/util/                     문서·검색 공통 유틸리티
+```
+
+라우터는 Repository를 직접 호출하지 않습니다. Service와 Repository는 요청마다 생성하고 같은 요청에서는 FastAPI 의존성 캐시로 재사용합니다. 설정·DB 엔진·세션 팩토리·HTTP 클라이언트만 프로세스별 Singleton입니다. Repository는 요청별 `AsyncSession`을 생성자로 받으므로 업무 메서드마다 세션이나 UoW를 전달하지 않습니다.
+
+### 객체 수명과 트랜잭션 규칙
+
+| 객체 | 수명 | 공유 범위 |
+|---|---|---|
+| 설정·DB 엔진·연결 풀·HTTP 클라이언트 | Singleton | 서버 프로세스 |
+| Service·Repository·AsyncSession | 요청별 | 동일 요청의 의존성 그래프 |
+| DB 연결 | 풀에서 대여·반납 | 짧은 DB 트랜잭션 |
+
+최상위 업무 서비스가 `async with self._session.begin()`을 시작하고 하위 서비스는 같은 세션으로 참여합니다. 예를 들어 `DocumentService`에서 문서를 저장한 뒤 `ChunkService`가 청크를 저장하면 둘 중 하나가 실패할 때 모두 롤백됩니다. 하위 서비스는 `begin()`, `commit()`을 호출하지 않습니다. 자체 트랜잭션을 여는 진입 메서드끼리 중첩 호출하지 말고 참여용 메서드로 분리합니다. 자동 전파 데코레이터는 사용하지 않습니다.
+
+같은 세션을 사용하는 업무는 순차 실행하며 `asyncio.gather()`로 병렬 DB 작업을 실행하지 않습니다. 임베딩과 답변 생성은 DB 트랜잭션 밖에서 수행합니다. 문서 교체·삭제는 쓰기 시 원본 행을 잠그며, 요청 종료 시 세션을 닫고 서버 종료 시 HTTP 클라이언트와 DB 엔진을 정리합니다.
+
+### 저사양 환경 연결 제한
+
+| 환경변수 | 기본값 | 의미 |
+|---|---:|---|
+| `DB_POOL_SIZE` | 5 | 프로세스별 DB 풀 크기 |
+| `DB_MAX_OVERFLOW` | 0 | 풀 외 추가 연결 허용 수 |
+| `DB_POOL_TIMEOUT` | 10 | DB 연결 대기 제한(초) |
+| `HTTP_MAX_CONNECTIONS` | 2 | 공유 Ollama HTTP 풀 최대 연결 수 |
+| `HTTP_POOL_TIMEOUT` | 5 | HTTP 연결 대기 제한(초), 초과 시 503 |
+
+풀 제한은 전체 대기 요청 수를 제한하지 않습니다. 운영에서는 서버 동시성 제한도 함께 설정합니다. 다음은 단일 프로세스 시작 예시이며 실제 용량에 맞게 조정해야 합니다.
+
+```powershell
+uv run uvicorn main:app --env-file .env.dev --limit-concurrency 20
+```
+
+워커 수를 늘리면 풀과 Singleton도 워커마다 생성됩니다. DB 최대 연결 수는 워커 수 × (`DB_POOL_SIZE` + `DB_MAX_OVERFLOW`)와 다른 애플리케이션 연결까지 합산해 산정합니다.
+
+DB 접근은 `core/db/database.py`의 SQLAlchemy `AsyncSession`과 `asyncpg` 드라이버를 사용하며, 연결 URL은 `postgresql+asyncpg://` 형식입니다. 쓰기 작업은 서비스에서 `async with session.begin()`으로 트랜잭션을 처리합니다. 라우터는 SQL을 직접 실행하지 않습니다.
 
 ## 5. 현재 구현된 기능
 
 ### 문서 관리
 
 - TXT 파일 업로드 및 UTF-8 검증
+- 파일명 경로 이탈 차단 및 최대 5MB 업로드 제한
 - 빈 줄 기준 문단 분할
 - `# 제목`, `1. 제목`처럼 명시된 제목을 다음 본문과 결합
 - 700자 초과 문단은 문장·공백 경계와 100자 overlap을 사용해 추가 분할
@@ -157,66 +236,71 @@ X-Process-Time: 0.123
 ```
 
 API 전체 처리 시간과 임베딩, DB 검색, 리랭킹, 답변 생성 단계별 시간을 응답 헤더로 측정합니다.
+또한 서버 로그에 요청 메서드, 경로, 상태 코드, 전체 처리 시간을 기록합니다. 요청 본문이나 환경변수 값은 로그에 기록하지 않습니다.
 
 ## 6. API 목록
+
+API의 상위 경로와 기능별 기준 경로는 `main.py`에서 고정합니다. 운영 API는 `/api/chat`, `/api/search`, `/api/documents`를 사용하고, 테스트 기능은 `/api/test` 아래에 둡니다. 라우터 파일은 각 기준 경로 아래의 상세 경로만 선언합니다.
 
 ### 상태·기본 기능
 
 | 메서드 | 경로 | 설명 |
 |---|---|---|
-| GET | `/` | 서버 실행 확인 |
-| GET | `/health` | 상태 확인 |
-| GET | `/db-test` | DB 연결 및 청크 수 확인 |
-| POST | `/embedding-test` | 임베딩 생성 테스트 |
+| GET | `/api/` | 서버 실행 확인 |
+| GET | `/api/health` | 상태 확인 |
+| GET | `/api/test/db-test` | DB 연결 및 청크 수 확인 |
+| POST | `/api/test/embedding-test` | 임베딩 생성 테스트 |
 
 ### 문서 관리
 
 | 메서드 | 경로 | 설명 |
 |---|---|---|
-| POST | `/documents/upload` | TXT 업로드 및 청크·임베딩 저장 |
-| GET | `/documents` | 문서 목록 조회 |
-| GET | `/documents/{source_document_id}` | 문서 상세 조회 |
-| PUT | `/documents/{source_document_id}` | 문서 교체 및 재임베딩, `force=true`로 동일 내용도 재처리 |
-| DELETE | `/documents/{source_document_id}` | 문서와 연결 청크 삭제 |
+| POST | `/api/documents/upload` | TXT 업로드 및 청크·임베딩 저장 |
+| GET | `/api/documents` | 문서 목록 조회 |
+| GET | `/api/documents/{source_document_id}` | 문서 상세 조회 |
+| PUT | `/api/documents/{source_document_id}` | 문서 교체 및 재임베딩, `force=true`로 동일 내용도 재처리 |
+| DELETE | `/api/documents/{source_document_id}` | 문서와 연결 청크 삭제 |
 
 ### 검색·챗 API
 
 | 메서드 | 경로 | 설명 |
 |---|---|---|
-| POST | `/chat` | DB 벡터 거리 기반 의미 중복 제거 후 답변 생성하는 운영 API |
-| POST | `/search` | 거리순 상위 3개 검색 |
-| POST | `/search/filtered` | 거리 `<= 0.5` 결과 검색 |
+| POST | `/api/chat` | DB 벡터 거리 기반 의미 중복 제거 후 답변 생성하는 운영 API |
+| POST | `/api/search` | 거리순 상위 3개 검색 |
 
 ### 테스트 API
 
 | 메서드 | 경로 | 설명 |
 |---|---|---|
-| POST | `/test/chat/basic` | 기본 검색 실험 |
-| POST | `/test/chat/filtered` | 거리 필터링 실험 |
-| POST | `/test/chat/reranked` | 거리 필터링 후 리랭킹 실험 |
-| POST | `/test/chat/deduplicated` | Python 중복 제거 실험 |
-| POST | `/test/chat/deduplicated-db` | DB 중복 제거 실험 |
-| POST | `/test/chat/semantic-deduplicated` | 의미상 중복 제거 실험 |
-| POST | `/test/chat/semantic-reranked` | 의미상 중복 제거 후 리랭킹 실험 |
+| POST | `/api/test/chat/basic` | 기본 검색 실험 |
+| POST | `/api/test/chat/filtered` | 거리 필터링 실험 |
+| POST | `/api/test/chat/reranked` | 거리 필터링 후 리랭킹 실험 |
+| POST | `/api/test/chat/deduplicated` | Python 중복 제거 실험 |
+| POST | `/api/test/chat/deduplicated-db` | DB 중복 제거 실험 |
+| POST | `/api/test/chat/semantic-deduplicated` | 의미상 중복 제거 실험 |
+| POST | `/api/test/chat/semantic-reranked` | 의미상 중복 제거 후 리랭킹 실험 |
+| GET | `/api/test/db-test` | DB 연결 테스트 |
+| POST | `/api/test/embedding-test` | 임베딩 생성 테스트 |
+| POST | `/api/test/search/filtered` | 거리 필터링 검색 실험 |
 
-초기 실험용 오타 엔드포인트 `/docuemnts`는 하위 호환을 위해 남아 있을 수 있습니다. 신규 기능에서는 `/documents/upload`를 사용합니다.
+초기 실험용 오타 엔드포인트는 제거했습니다. 신규 기능에서는 `/api/documents/upload`를 사용합니다.
 
-### 목표 라우터 구조
+### 현재 라우터 구조
 
 Swagger 문서에서는 태그 순서를 `운영 API → 테스트 API → 검색 API → 문서 관리 → 상태 확인`으로 고정해 운영 API와 실험 API가 섞이지 않도록 구성했습니다.
 
 | 구분 | 목표 경로 | 용도 |
 |---|---|---|
-| 운영 API | `/chat` | 최종 검증된 검색 전략만 제공 |
-| 실험 API | `/test/chat/basic` | 기본 검색 비교 |
-| 실험 API | `/test/chat/filtered` | 거리 필터링 비교 |
-| 실험 API | `/test/chat/deduplicated` | Python 중복 제거 비교 |
-| 실험 API | `/test/chat/deduplicated-db` | DB 중복 제거 비교 |
-| 실험 API | `/test/chat/semantic-deduplicated` | 의미상 중복 제거 비교 |
-| 실험 API | `/test/chat/reranked` | 거리 필터링 후 리랭킹 비교 |
-| 실험 API | `/test/chat/semantic-reranked` | 의미상 중복 제거·리랭킹 비교 |
+| 운영 API | `/api/chat` | 최종 검증된 검색 전략만 제공 |
+| 실험 API | `/api/test/chat/basic` | 기본 검색 비교 |
+| 실험 API | `/api/test/chat/filtered` | 거리 필터링 비교 |
+| 실험 API | `/api/test/chat/deduplicated` | Python 중복 제거 비교 |
+| 실험 API | `/api/test/chat/deduplicated-db` | DB 중복 제거 비교 |
+| 실험 API | `/api/test/chat/semantic-deduplicated` | 의미상 중복 제거 비교 |
+| 실험 API | `/api/test/chat/reranked` | 거리 필터링 후 리랭킹 비교 |
+| 실험 API | `/api/test/chat/semantic-reranked` | 의미상 중복 제거·리랭킹 비교 |
 
-운영 API `/chat`의 검색 전략은 내부 서비스 함수에서 관리하고, 외부 경로는 안정적으로 유지합니다. 실험 API는 검색 방식 비교와 벤치마크를 위해 유지합니다.
+운영 API `/api/chat`의 검색 전략은 내부 서비스 함수에서 관리하고, 외부 경로는 안정적으로 유지합니다. 실험 API는 `/api/test` 아래에서 검색 방식 비교와 벤치마크를 위해 유지합니다.
 
 대표 요청:
 
@@ -231,14 +315,14 @@ Swagger 문서에서는 태그 순서를 `운영 API → 테스트 API → 검�
 ```json
 {
   "question": "질문",
-  "answer": "문서 기반 답변",
+  "answer": "업로드 문서 기반 답변",
   "sources": [
     {
       "id": 7,
       "content": "검색된 청크",
       "distance": 0.123,
       "source_document_id": 1,
-      "filename": "문서.txt"
+      "filename": "업로드 문서.txt"
     }
   ]
 }
@@ -322,14 +406,29 @@ http://127.0.0.1:8000/docs
 
 ## 10. 테스트 방법
 
-1. `GET /health`로 서버 상태 확인
-2. `GET /db-test`로 DB 연결 확인
-3. `POST /documents/upload`로 TXT 업로드
+1. `GET /api/health`로 서버 상태 확인
+2. `GET /api/test/db-test`로 DB 연결 확인
+3. `POST /api/documents/upload`로 TXT 업로드
 4. 문서 목록과 상세 조회로 저장 확인
-5. `POST /search`로 기본 검색 확인
-6. 운영 API `/chat`과 일곱 가지 `/test/chat/*` 엔드포인트에 같은 질문 전송
+5. `POST /api/search`로 기본 검색 확인
+6. 운영 API `/api/chat`과 일곱 가지 `/api/test/chat/*` 엔드포인트에 같은 질문 전송
 7. `answer`, `sources`, `distance`, `filename` 비교
 8. `X-Process-Time`, `X-Embedding-Time`, `X-DB-Time`, `X-Rerank-Time`, `X-Answer-Time` 값 비교
+9. `test/test_document_api.py`로 문서 관리 API 회귀 테스트 실행
+10. `test/test_error_api.py`로 `400`, `404`, `413` 오류 응답 검증
+11. `test/test_fault_api.py`로 DB·Ollama 장애 응답 검증
+12. `test/test_concurrency.py`로 동시 요청 처리 검증
+
+핵심 테스트 명령은 다음과 같습니다.
+
+```powershell
+uv run python test/test_quality.py
+uv run python test/test_document_api.py
+uv run python test/test_error_api.py
+uv run python test/test_fault_api.py
+uv run python test/test_concurrency.py
+uv run python test/test_search_benchmark.py
+```
 
 테스트 질문:
 
@@ -350,6 +449,8 @@ http://127.0.0.1:8000/docs
 마지막 질문은 문서에 없는 정보를 모델이 만들어내지 않는지 확인하기 위한 질문입니다.
 
 ## 11. 실험 결과와 한계
+
+이 절의 과거 벤치마크 표는 `/api` 공통 prefix를 적용하기 전 실행 결과라 경로 표기에서 prefix가 생략되어 있습니다. 현재 실행 경로는 모두 `/api/...`입니다.
 
 | 관찰 내용 | 의미 |
 |---|---|
@@ -445,7 +546,8 @@ http://127.0.0.1:8000/docs
 
 | 항목 | 결과 |
 |---|---|
-| 품질 테스트 | 4개 모두 PASS |
+| 품질 테스트 | 6개 모두 PASS |
+| 문서 관리 회귀 테스트 | 업로드·조회·교체·삭제 전체 PASS |
 | 벤치마크 반복 횟수 | API별 5회 |
 | HTTP 상태 | 전체 200 |
 | 운영 API 평균 응답 시간 | 1.653초 |
@@ -482,8 +584,8 @@ http://127.0.0.1:8000/docs
 - 고정 거리 임계값 `0.5` 검증 필요
 - 의미 거리와 문자열 포함 관계 기반 중복 제거를 지원하며 임계값 추가 검증 필요
 - 단계별 성능 측정 결과를 파일로 저장하는 기능 부족
-- `async def` 안에서 동기 DB 호출을 사용할 가능성 있음
-- 인증, 파일 크기 제한, 악성 파일 검사, 운영 모니터링 부족
+- SQLAlchemy 비동기 세션을 사용하며, 서비스 쓰기 작업의 트랜잭션 경계를 적용함
+- 인증, 악성 파일 검사, 운영 모니터링은 다음 단계
 
 테스트용 ESS 데이터는 학습용 가상 데이터이며 실제 장비 운영 기준으로 사용하면 안 됩니다.
 
@@ -500,16 +602,22 @@ http://127.0.0.1:8000/docs
 | DB 중복 제거 | 완료 | `/test/chat/deduplicated-db` |
 | 전체 응답 시간 측정 | 완료 | `X-Process-Time` |
 | 단계별 성능 측정 | 완료 | `X-Embedding-Time`, `X-DB-Time`, `X-Rerank-Time`, `X-Answer-Time` |
-| 검색 로직 공통화 | 완료 | `retrieve_documents()`로 검색 전략 통합 |
+| 검색 로직 공통화 | 완료 | `core/util/retrieval.py`의 `find_documents_by_question()`로 검색 전략 통합 |
 | 의미상 중복 제거 | 완료 | `/chat`, `/test/chat/semantic-deduplicated` |
 | 의미상 중복 제거·리랭킹 | 완료 | `/test/chat/semantic-reranked` |
 | 추론 답변 모델 설치 | 완료 | `study-rag-llm:latest` 설치 확인 |
 | 추론 답변 모델 코드 전환 | 보류 | 운영 모델은 `qwen2.5:3b`, 추론 모델은 실험용 |
 | 테스트·운영 라우터 분리 | 완료 | `/test/chat/*`와 `/chat` 구조 |
-| 검색 품질 자동 평가 | 완료 | `test_quality.py` 4개 케이스 통과 |
-| 검색 벤치마크 | 완료 | `test_search_benchmark.py`, API별 5회 반복 측정 |
+| 검색 품질 자동 평가 | 완료 | `test/test_quality.py` 6개 케이스 통과 |
+| 검색 벤치마크 | 완료 | `test/test_search_benchmark.py`, API별 5회 반복 측정 |
 | 벤치마크 중복 실행 방지 | 완료 | 잠금 파일과 진행 상태 출력 적용 |
-| 자동화 테스트 | 진행 중 | 품질 4개 케이스와 API 성능 비교 완료, 문서 관리 회귀 테스트 필요 |
+| 자동화 테스트 | 완료 | 품질·문서·오류·장애·동시성 테스트 완료 |
+| 계층형 아키텍처 | 완료 | `router → service → repo` 구조로 분리 |
+| SQLAlchemy·asyncpg 전환 | 완료 | ORM 모델·AsyncSession·Repository와 `postgresql+asyncpg` 적용 |
+| Singleton·Factory DI 컨테이너 | 완료 | 인프라 Singleton, Service·Repository는 요청별 Factory와 Depends 캐시 |
+| CBV 라우터 | 완료 | 클래스 속성 주입, 기존 API 경로 유지 |
+| 여러 서비스의 원자적 변경 | 격리 테스트 완료 | 문서·청크 공동 롤백과 취소 시 정리 검증 |
+| 서비스 트랜잭션 | 완료 | 문서 생성·업로드·교체·삭제의 DB 변경을 서비스 흐름에서 처리 |
 
 ## 13. 남은 작업 목록
 
@@ -520,36 +628,64 @@ http://127.0.0.1:8000/docs
 | 1단계 | FastAPI 실제 실행 명령과 포트 확인 | 높음 | 완료 | `--env-file .env.dev`, 포트 8000 확인 |
 | 1단계 | 테스트·운영 라우터 분리 | 높음 | 완료 | `/test/chat/*`와 `/chat` 구조로 이동 |
 | 1단계 | `study-rag-llm:latest`를 답변 생성에 연결 | 높음 | 보류 | 추론 출력과 응답 시간이 불안정해 실험용 유지 |
-| 2단계 | 검색 SQL과 결과 변환 로직 공통화 | 높음 | 완료 | `retrieve_documents()`와 `row_to_document()` 구현 |
+| 2단계 | 검색 SQL과 결과 변환 로직 공통화 | 높음 | 완료 | `repo/document_repo.py`로 이동 |
 | 2단계 | 검색 전략을 공통 함수 옵션으로 통합 | 높음 | 완료 | `basic`, `filtered`, `deduplicated`, `deduplicated-db` 지원 |
 | 2단계 | 운영용 기본 전략을 `/chat`에 연결 | 높음 | 완료 | `/chat`에 `semantic-deduplicated` 전략 연결 |
 | 2단계 | 관련성 낮은 결과의 답변 생성 중단 기준 검증 | 높음 | 부분 완료 | 거리 임계값 실험 필요 |
-| 3단계 | 질문 유형별 테스트와 기대 출처 작성 | 높음 | 완료 | `test_quality.py` 4개 평가 케이스 통과 |
+| 3단계 | 질문 유형별 테스트와 기대 출처 작성 | 높음 | 완료 | `test/test_quality.py` 6개 평가 케이스 통과 |
 | 3단계 | 검색 방식별 정확도·재현율·응답 시간 비교 자동화 | 높음 | 부분 완료 | 5회 반복 시간 비교 완료, 질문 세트 확장 필요 |
 | 3단계 | `study-rag-llm:latest` 기준 전체 벤치마크 | 높음 | 완료 | 추론 출력 문제와 높은 응답 시간 확인 |
 | 3단계 | 새 모델 추론 시간 최적화 | 높음 | 보류 | `qwen3:4b` 기반 모델의 `think: false` 동작 문제 해결 필요 |
 | 3단계 | `qwen2.5:3b` 운영 모델 후보 확정 | 높음 | 완료 | 정상 답변과 평균 1~2초대 응답 확인 |
-| 3단계 | 의미상 중복 청크 제거 기준 검토 | 중간 | 완료 | 거리 기준 `0.1`과 문자열 포함 관계 적용, 추가 질문 확장 필요 |
+| 3단계 | 의미상 중복 청크 제거 기준 검토 | 중간 | 완료 | 거리 기준 `0.1`과 문자열 포함 관계 적용, 6개 질문 검증 |
 | 3단계 | 문서에 없는 질문의 거절 응답 테스트 | 높음 | 완료 | 출처 빈 목록과 거절 문구 검증 |
 | 4단계 | 단계별 성능 측정 추가 | 중간 | 완료 | 임베딩·DB·리랭킹·생성 시간 응답 헤더 제공 |
-| 4단계 | 동기 DB 호출 개선 검토 | 높음 | 미완료 | 동시 요청 대응 |
-| 4단계 | 자동화 테스트 추가 | 높음 | 진행 중 | 문서 관리 API와 오류 응답 회귀 테스트 필요 |
+| 4단계 | SQLAlchemy 비동기 DB 호출 | 높음 | 완료 | `AsyncEngine`, `AsyncSession`, Repository 적용 |
+| 4단계 | 운영 요청 로그 추가 | 중간 | 완료 | 메서드·경로·상태 코드·처리 시간 기록 |
+| 4단계 | 자동화 테스트 추가 | 높음 | 완료 | 문서·오류·장애·동시성·품질 테스트 완료 |
+| 4단계 | 최종 패키지·파일 구조 정리 | 중간 | 완료 | 단수형 이름, `core/llm`, `core/util`, 계층별 파일명 적용 |
+| 4단계 | 서비스 트랜잭션 경계 정리 | 높음 | 완료 | 문서 생성·업로드·조회·교체·삭제를 Service에서 처리 |
+| 4단계 | 동시성 병목 상세 분석 | 중간 | 보류 | 기본 3개 동시 요청 검증만 완료 |
 | 5단계 | 토큰 기준 청크와 overlap 적용 | 중간 | 미완료 | 현재는 문자 수 기준 700자와 100자 overlap |
 | 5단계 | PDF·DOCX 지원 | 낮음 | 미완료 | TXT 안정화 후 진행 |
 | 6단계 | 대화 문맥 유지와 웹 UI 구현 | 중간 | 미완료 | 서비스 기능 확장 |
-| 6단계 | 인증·업로드 보안·배포 구성 | 높음 | 미완료 | 운영 전 필요 |
+| 6단계 | 인증·악성 파일 검사·배포 구성 | 높음 | 미완료 | 운영 전 필요 |
+| 6단계 | API Key 인증 | 높음 | 미완료 | `/chat`과 문서 관리 API 보호 필요 |
 
 ## 14. 다음 진행 순서
 
-1. 문서 관리 API 회귀 테스트 추가
-2. 문서 업로드·교체·삭제 후 DB 무결성 검증
-3. 질문 유형을 확대해 의미 중복 제거 품질 재검증
-4. 동기 DB 호출의 동시 요청 영향 확인
-5. 업로드 파일 크기·확장자·악성 파일 검증 추가
-6. 인증과 운영 로그·모니터링 검토
-7. 필요 시 토큰 기준 청크 분할과 PDF·DOCX 지원 추가
+1. 서버 재시작 후 실제 PostgreSQL·Ollama 환경에서 품질·문서 관리 회귀 테스트 확인
+2. API Key 인증과 인증 실패 회귀 테스트 추가
+3. 운영 모니터링과 로그 보존 정책 검토
+4. 동시 업로드 중복 방지를 위한 DB 유일성 정책·마이그레이션 검토
+5. 악성 파일 내용 검사와 업로드 저장 정책 검토
+6. 필요 시 토큰 기준 청크 분할과 PDF·DOCX 지원 추가
 
-검색 로직 공통화, 테스트·운영 API 분리, 의미 중복 제거, 품질 테스트와 성능 비교는 완료했습니다. 다음 개발 우선순위는 문서 관리 API의 자동 회귀 테스트와 운영 안전성 보강입니다.
+### 이번 구조 변경 검증 범위
+
+추가 코드 검수에서 Repository의 불필요한 실행 래퍼와 모델 별칭을 제거하고 세션 사용을 직접 드러내도록 정리했습니다. 세션 생성은 Container의 요청 의존성 한 곳에서 관리합니다. DB URL은 SQLAlchemy `URL.create()`로 구성하여 비밀번호의 특수문자를 안전하게 처리합니다.
+
+공백 없는 긴 문서의 청크 누락과 overlap=0일 때 본문 건너뛰기를 수정했습니다. 업로드 본문은 제한 용량+1바이트까지만 읽어서 추가 메모리 사용을 제한합니다(HTTP 요청 수신 자체의 크기 제한은 프록시 등에서 별도 설정 필요). 비객체 JSON 리랭킹 응답 방어와 DB 종료 실패 시 Container 초기화도 보강했습니다. 기존 저장 청크는 자동 변경하지 않으며, 누락 영향을 받은 문서는 필요 시 교체 API로 재처리해야 합니다.
+
+이 경계값을 검증하는 단위 테스트 7개가 통과했습니다.
+
+```powershell
+uv run python -m unittest discover -s test -p test_unit.py -v
+```
+
+`test/test_architecture.py`의 8개 테스트가 통과했습니다. SQLite 격리 DB와 모킹을 사용해 요청별 세션 분리, 요청 내 객체 재사용, 문서 CRUD, 하위 서비스 실패·취소 시 공동 롤백, 교체 실패 시 원본 보존, API 경로 및 자원 종료를 확인했습니다. 실제 PostgreSQL 벡터 검색과 Ollama 품질·성능을 재측정한 결과는 아닙니다. 위 벤치마크 수치는 이전 구조의 기록입니다.
+
+```powershell
+uv run python -m unittest discover -s test -p test_architecture.py -v
+```
+
+모킹 기반 장애 테스트도 DB 503, Ollama 연결 실패 503, 응답 시간 초과 504, 연결 풀 대기 초과 503을 검증했습니다.
+
+```powershell
+uv run python test/test_fault_api.py
+```
+
+검색 로직 공통화, 테스트·운영 API 분리, 의미 중복 제거, 품질 테스트, 문서 관리 테스트와 기본 동시성 검증은 완료했습니다. 동시성 병목 상세 분석은 보류하고, 다음 개발 우선순위는 API 인증과 운영 안전성 보강입니다.
 
 ## 15. 확인 필요 항목
 

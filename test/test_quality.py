@@ -4,7 +4,7 @@ import httpx
 
 
 BASE_URL = "http://127.0.0.1:8000"
-ENDPOINT = "/chat"
+ENDPOINT = "/api/chat"
 TIMEOUT = 180.0
 
 TEST_CASES = [
@@ -37,6 +37,25 @@ TEST_CASES = [
         "required_answer_terms": ["충전", "85%"],
         "forbidden_answer_terms": [],
         "expected_source_count": 2
+    },
+    {
+        "name": "운영 온도와 보관 온도",
+        "question": "ESS 배터리의 적정 운영 온도와 보관 온도를 알려줘.",
+        "expected_source_terms": [
+            "적정 운영 온도는 20~25도",
+            "보관 온도는 10~30도"
+        ],
+        "required_answer_terms": ["20~25도", "10~30도"],
+        "forbidden_answer_terms": []
+    },
+    {
+        "name": "고온 대응",
+        "question": "ESS 배터리 온도가 40도를 초과하면 어떻게 해야 하나요?",
+        "expected_source_terms": [
+            "40도를 초과하면 냉각 시스템을 가동"
+        ],
+        "required_answer_terms": ["40도", "냉각"],
+        "forbidden_answer_terms": []
     },
     {
         "name": "문서에 없는 질문",
@@ -108,7 +127,7 @@ def validate_response(test_case: dict, response_body: dict) -> list[str]:
 
 
 def run_quality_tests() -> list[dict]:
-    results = []
+    rs = []
 
     with httpx.Client(timeout=TIMEOUT) as client:
         for test_case in TEST_CASES:
@@ -126,7 +145,7 @@ def run_quality_tests() -> list[dict]:
                 else:
                     errors.extend(validate_response(test_case, response_body))
 
-                results.append({
+                rs.append({
                     "name": test_case["name"],
                     "status_code": response.status_code,
                     "passed": not errors,
@@ -138,7 +157,7 @@ def run_quality_tests() -> list[dict]:
                     ]
                 })
             except (httpx.RequestError, ValueError) as error:
-                results.append({
+                rs.append({
                     "name": test_case["name"],
                     "status_code": None,
                     "passed": False,
@@ -147,30 +166,30 @@ def run_quality_tests() -> list[dict]:
                     "source_ids": []
                 })
 
-    return results
+    return rs
 
 
-def print_results(results: list[dict]) -> None:
+def print_rs(rs: list[dict]) -> None:
     print(f"대상 API: {ENDPOINT}")
-    print(f"테스트 수: {len(results)}")
+    print(f"테스트 수: {len(rs)}")
     print()
 
-    for result in results:
-        status = "PASS" if result["passed"] else "FAIL"
-        print(f"[{status}] {result['name']}")
-        print(f"  HTTP: {result['status_code']}")
-        print(f"  source IDs: {result['source_ids']}")
-        print(f"  answer: {result['answer']}")
+    for item_rs in rs:
+        status = "PASS" if item_rs["passed"] else "FAIL"
+        print(f"[{status}] {item_rs['name']}")
+        print(f"  HTTP: {item_rs['status_code']}")
+        print(f"  source IDs: {item_rs['source_ids']}")
+        print(f"  answer: {item_rs['answer']}")
 
-        for error in result["errors"]:
+        for error in item_rs["errors"]:
             print(f"  error: {error}")
 
         print()
 
 
 if __name__ == "__main__":
-    quality_results = run_quality_tests()
-    print_results(quality_results)
+    quality_rs = run_quality_tests()
+    print_rs(quality_rs)
 
-    if any(not result["passed"] for result in quality_results):
+    if any(not item_rs["passed"] for item_rs in quality_rs):
         sys.exit(1)
