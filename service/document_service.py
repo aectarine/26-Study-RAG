@@ -1,4 +1,5 @@
 from fastapi import HTTPException
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.embed.embedding import EmbeddingClient
@@ -55,9 +56,15 @@ class DocumentService:
 
     async def _find_duplicate(self, filename: str, content_hash: str):
         """현재 트랜잭션 안에서 검사하며 자체 트랜잭션은 시작하지 않습니다."""
-        existing = await self._repository.find_source_document_by_filename(filename)
+        existing = await self._repository.find_source_document_by_filename_or_hash(
+            filename, content_hash
+        )
         if existing is None:
             return None
+        if existing.filename != filename:
+            raise HTTPException(
+                409, f"같은 내용이 '{existing.filename}'으로 이미 등록되어 있습니다."
+            )
         if existing.content_hash != content_hash:
             raise HTTPException(409, "같은 파일명으로 등록된 문서가 있지만 내용이 다릅니다.")
         return {"filename": filename, "source_document_id": existing.id,
@@ -75,15 +82,23 @@ class DocumentService:
         embeddings = [
             await self._embedding_client.create_embedding(chunk) for chunk in chunks
         ]
-        async with self._session.begin():
-            # 임베딩 생성 중 등록된 문서가 있는지 다시 검사합니다.
-            duplicate = await self._find_duplicate(filename, content_hash)
-            if duplicate:
-                return duplicate
-            source = await self._repository.save_source_document(filename, content_hash)
-            documents = await self._chunk_service.save_chunks(source.id, chunks, embeddings)
-            rs = {"filename": filename, "source_document_id": source.id,
-                  "chunk_count": len(documents), "documents": documents, "status": "saved"}
+        try:
+            async with self._session.begin():
+                # 임베딩 생성 중 등록된 문서가 있는지 다시 검사합니다.
+                duplicate = await self._find_duplicate(filename, content_hash)
+                if duplicate:
+                    return duplicate
+                source = await self._repository.save_source_document(filename, content_hash)
+                documents = await self._chunk_service.save_chunks(source.id, chunks, embeddings)
+                rs = {"filename": filename, "source_document_id": source.id,
+                      "chunk_count": len(documents), "documents": documents, "status": "saved"}
+        except IntegrityError as error:
+            # 동시 요청이 먼저 저장한 경우이며, 재검사가 충돌 원인을 알려 줍니다.
+            async with self._session.begin():
+                duplicate = await self._find_duplicate(filename, content_hash)
+                if duplicate:
+                    return duplicate
+            raise HTTPException(409, "이미 등록된 문서와 충돌했습니다.") from error
         return rs
 
     async def replace_document_by_id(
@@ -102,22 +117,30 @@ class DocumentService:
         embeddings = [
             await self._embedding_client.create_embedding(chunk) for chunk in chunks
         ]
-        async with self._session.begin():
-            # 같은 문서의 교체/삭제 작업을 직렬화하고 최신 값을 다시 읽습니다.
-            source = await self._repository.find_source_document_by_id(
-                source_document_id, for_update=True
-            )
-            if source is None:
-                raise HTTPException(404, "해당 문서를 찾을 수 없습니다.")
-            if source.content_hash == new_hash and not force:
-                return {"source_document_id": source_document_id, "status": "skipped",
-                        "message": "기존 문서와 내용이 동일합니다. force=true를 사용하세요."}
-            await self._chunk_service.delete_chunks_by_source_id(source_document_id)
-            documents = await self._chunk_service.save_chunks(
-                source_document_id, chunks, embeddings
-            )
-            source.filename = filename
-            source.content_hash = new_hash
+
+        try:
+            async with self._session.begin():
+                # 같은 문서의 교체/삭제 작업을 직렬화하고 최신 값을 다시 읽습니다.
+                source = await self._repository.find_source_document_by_id(
+                    source_document_id, for_update=True
+                )
+                if source is None:
+                    raise HTTPException(404, "해당 문서를 찾을 수 없습니다.")
+                if source.content_hash == new_hash and not force:
+                    return {"source_document_id": source_document_id, "status": "skipped",
+                            "message": "기존 문서와 내용이 동일합니다. force=true를 사용하세요."}
+                await self._chunk_service.delete_chunks_by_source_id(source_document_id)
+                documents = await self._chunk_service.save_chunks(
+                    source_document_id, chunks, embeddings
+                )
+                source.filename = filename
+                source.content_hash = new_hash
+        except IntegrityError as error:
+            # 다른 문서가 이미 같은 파일명을 사용 중입니다.
+            raise HTTPException(
+                409, "같은 파일명으로 등록된 다른 문서가 있습니다."
+            ) from error
+
         return {"filename": filename, "source_document_id": source_document_id,
                 "chunk_count": len(documents), "documents": documents, "status": "replaced"}
 

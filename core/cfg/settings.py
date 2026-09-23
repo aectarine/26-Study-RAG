@@ -32,6 +32,10 @@ class Settings:
         self.answer_timeout = float(os.getenv("OLLAMA_ANSWER_TIMEOUT", "180"))
         self.rerank_timeout = float(os.getenv("OLLAMA_RERANK_TIMEOUT", "120"))
         self.embedding_model = os.getenv("EMBEDDING_MODEL", "embeddinggemma")
+        self.embedding_timeout = float(os.getenv("OLLAMA_EMBEDDING_TIMEOUT", "60"))
+        if (self.answer_timeout <= 0 or self.rerank_timeout <= 0
+                or self.embedding_timeout <= 0):
+            raise ValueError("Ollama 요청 제한 시간은 양수여야 합니다.")
 
     @property
     def database_url(self) -> URL:

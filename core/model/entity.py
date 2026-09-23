@@ -22,6 +22,18 @@ class Vector(UserDefinedType):
 
         return process
 
+    def result_processor(self, dialect, coltype):
+        def process(value):
+            # pgvector는 '[0.1,0.2,...]' 형태의 문자열로 값을 돌려줍니다.
+            if value is None or not isinstance(value, str):
+                return value
+            body = value.strip().strip("[]")
+            if not body:
+                return []
+            return [float(item) for item in body.split(",")]
+
+        return process
+
 
 class Base(DeclarativeBase):
     pass
@@ -31,7 +43,7 @@ class SourceDocument(Base):
     __tablename__ = "source_documents"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    filename: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     inserted: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

@@ -12,7 +12,16 @@ def register_timing_middleware(app: FastAPI) -> None:
     async def measure_response_time(request: Request, call_next):
         request.state.timings = {}
         started = time.perf_counter()
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception:
+            elapsed = time.perf_counter() - started
+            logger.exception(
+                "request method=%s path=%s status=500 process_time=%.3fs",
+                request.method, request.url.path, elapsed
+            )
+            raise
+
         elapsed = time.perf_counter() - started
         response.headers["X-Process-Time"] = f"{elapsed:.3f}"
         header_names = {

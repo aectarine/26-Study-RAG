@@ -5,7 +5,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.embed.embedding import EmbeddingClient
 from repo.document_repo import DocumentRepository
 
-
 SEARCH_LIMIT = 3
 CANDIDATE_LIMIT = 5
 DISTANCE_THRESHOLD = 0.5
@@ -40,14 +39,19 @@ class RagService:
             for row in rows
         ]
         if strategy == "deduplicated":
-            seen = set()
-            documents = [d for d in documents if not (d["content"].strip() in seen or seen.add(d["content"].strip()))]
+            # 같은 본문은 거리가 가장 가까운 것만 남깁니다.
+            unique = {}
+            for document in documents:
+                unique.setdefault(document["content"].strip(), document)
+            documents = list(unique.values())[:SEARCH_LIMIT]
         if strategy == "semantic-deduplicated":
-            normalized = [" ".join(d["content"].split()) for d in documents]
-            documents = [d for i, d in enumerate(documents) if not any(
+            # SQL은 후보를 CANDIDATE_LIMIT까지 남기므로 여기서 SEARCH_LIMIT으로 자릅니다.
+            candidates = documents
+            normalized = [" ".join(d["content"].split()) for d in candidates]
+            documents = [d for i, d in enumerate(candidates) if not any(
                 i != j and len(normalized[i]) > len(normalized[j])
                 and normalized[j] in normalized[i]
-                and documents[j]["distance"] <= d["distance"]
-                for j in range(len(documents))
-            )]
+                and candidates[j]["distance"] <= d["distance"]
+                for j in range(len(candidates))
+            )][:SEARCH_LIMIT]
         return documents

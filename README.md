@@ -120,7 +120,6 @@ Ollama 답변 생성
 | `core/handler/exception.py` | 공통 예외 응답 등록 |
 | `core/middleware/timing.py` | 처리 시간 헤더와 요청 로그 미들웨어 |
 | `core/util/document.py` | TXT 검증·해시·청크 분할 유틸리티 |
-| `core/util/retrieval.py` | DI 컨테이너를 사용하는 검색 호출 유틸리티 |
 | `repo/document_repo.py` | 문서·청크 CRUD와 벡터 검색 Repository |
 | `service/document_service.py` | 문서 생성·업로드·조회·교체·삭제 업무와 트랜잭션 경계 |
 | `service/chunk_service.py` | 상위 서비스 트랜잭션에 참여하는 청크 저장·삭제 |
@@ -191,6 +190,9 @@ core/util/                     문서·검색 공통 유틸리티
 | `DB_POOL_TIMEOUT` | 10 | DB 연결 대기 제한(초) |
 | `HTTP_MAX_CONNECTIONS` | 2 | 공유 Ollama HTTP 풀 최대 연결 수 |
 | `HTTP_POOL_TIMEOUT` | 5 | HTTP 연결 대기 제한(초), 초과 시 503 |
+| `OLLAMA_EMBEDDING_TIMEOUT` | 60 | 임베딩 생성 요청 제한(초) |
+| `OLLAMA_RERANK_TIMEOUT` | 120 | 리랭킹 요청 제한(초) |
+| `OLLAMA_ANSWER_TIMEOUT` | 180 | 답변 생성 요청 제한(초) |
 
 풀 제한은 전체 대기 요청 수를 제한하지 않습니다. 운영에서는 서버 동시성 제한도 함께 설정합니다. 다음은 단일 프로세스 시작 예시이며 실제 용량에 맞게 조정해야 합니다.
 
@@ -602,7 +604,7 @@ uv run python test/test_search_benchmark.py
 | DB 중복 제거 | 완료 | `/test/chat/deduplicated-db` |
 | 전체 응답 시간 측정 | 완료 | `X-Process-Time` |
 | 단계별 성능 측정 | 완료 | `X-Embedding-Time`, `X-DB-Time`, `X-Rerank-Time`, `X-Answer-Time` |
-| 검색 로직 공통화 | 완료 | `core/util/retrieval.py`의 `find_documents_by_question()`로 검색 전략 통합 |
+| 검색 로직 공통화 | 완료 | `service/rag_service.py`의 `find_documents_by_question()`로 검색 전략 통합 |
 | 의미상 중복 제거 | 완료 | `/chat`, `/test/chat/semantic-deduplicated` |
 | 의미상 중복 제거·리랭킹 | 완료 | `/test/chat/semantic-reranked` |
 | 추론 답변 모델 설치 | 완료 | `study-rag-llm:latest` 설치 확인 |

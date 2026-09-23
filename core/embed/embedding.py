@@ -16,7 +16,8 @@ class EmbeddingClient:
         started = time.perf_counter()
         response = await self._http_client.post(
             f"{self.settings.ollama_url}/api/embed",
-            timeout=httpx.Timeout(120.0, pool=self.settings.http_pool_timeout),
+            timeout=httpx.Timeout(self.settings.embedding_timeout,
+                                  pool=self.settings.http_pool_timeout),
             json={"model": self.settings.embedding_model, "input": text},
         )
         response.raise_for_status()
